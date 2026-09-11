@@ -1,3 +1,5 @@
 node_modules/
 *.tgz
 .DS_Store
+# 本地计划/草稿产物（plan skill）
+.omc/
