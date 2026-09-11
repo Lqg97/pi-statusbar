@@ -19,8 +19,8 @@
  *   auto 按终端宽度自动选择：≥120 列用右侧面板，否则底部单行，resize 实时切换；
  *   右侧面板为非捕获浮层（不抢键盘焦点），宽度由 rightWidth 配置（默认 32 列）；
  *   注意：面板浮在聊天内容之上，会遮住右缘内容（pi 扩展 API 不支持真布局分栏）；
- *   /statusbar 无参数打开交互式菜单（布局 / 指标显隐 / 启停），或子命令快捷方式：
- *   /statusbar [on|off] | layout [right|bottom|auto] | metrics
+ *   /statusbar 无参数打开交互式菜单（↑↓ 选择，←→ 实时切换布局，菜单项：指标显隐 / 启停），
+ *   或子命令快捷方式：/statusbar [on|off] | layout [right|bottom|auto] | metrics
  * - 新会话默认恢复自定义样式
  * - 用户配置 ~/.pi/agent/statusbar.json（环境变量 PI_STATUSBAR_CONFIG 可覆盖路径）：
  *     priceMap         本地模型 → models.dev 单价映射，key 为 "provider:model" 或裸 "model"
@@ -40,6 +40,7 @@ import type {
 	Theme,
 } from "@earendil-works/pi-coding-agent";
 import {
+	matchesKey,
 	truncateToWidth,
 	visibleWidth,
 	wrapTextWithAnsi,
@@ -1078,6 +1079,92 @@ export default function (pi: ExtensionAPI) {
 
 	// ---------- 命令与事件 ----------
 
+	type MenuAction = "metrics" | "toggle";
+
+	/** /statusbar 交互式菜单：↑↓ 选择、←→ 实时切换布局（不作为菜单项外显）、Enter 确认、Esc 退出 */
+	class StatusbarMenuComponent {
+		private sel = 0;
+		private cachedW?: number;
+		private cachedLines?: string[];
+		private readonly items: { text: () => string; action: MenuAction }[] = [
+			{ text: () => "配置指标显隐…", action: "metrics" },
+			{
+				text: () =>
+					userWants
+						? "停用自定义状态栏（恢复内置 footer）"
+						: "启用自定义状态栏",
+				action: "toggle",
+			},
+		];
+
+		constructor(
+			private theme: Theme,
+			private close: (action: MenuAction | null) => void,
+		) {}
+
+		private cycleLayout(dir: 1 | -1): void {
+			const ORDER: LayoutMode[] = ["bottom", "right", "auto"];
+			const i = ORDER.indexOf(layoutMode);
+			layoutMode = ORDER[(i + dir + ORDER.length) % ORDER.length];
+			if (userWants) activeTui?.requestRender();
+			this.invalidate();
+		}
+
+		handleInput(data: string): void {
+			if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c"))
+				return this.close(null);
+			if (matchesKey(data, "up")) {
+				this.sel = (this.sel + this.items.length - 1) % this.items.length;
+				this.invalidate();
+				return;
+			}
+			if (matchesKey(data, "down")) {
+				this.sel = (this.sel + 1) % this.items.length;
+				this.invalidate();
+				return;
+			}
+			if (matchesKey(data, "left")) return this.cycleLayout(-1);
+			if (matchesKey(data, "right")) return this.cycleLayout(1);
+			if (matchesKey(data, "return"))
+				return this.close(this.items[this.sel].action);
+		}
+
+		render(width: number): string[] {
+			if (this.cachedLines && this.cachedW === width) return this.cachedLines;
+			const th = this.theme;
+			const lines: string[] = [""];
+			lines.push(
+				truncateToWidth(
+					`  ${th.fg("accent", "状态栏设置")}  ${th.fg("dim", `布局 ${layoutMode}`)}`,
+					width,
+				),
+			);
+			lines.push("");
+			this.items.forEach((it, i) => {
+				const cur = i === this.sel;
+				const mark = cur ? th.fg("accent", "❯") : " ";
+				const text = cur ? th.fg("text", it.text()) : th.fg("muted", it.text());
+				lines.push(truncateToWidth(`  ${mark} ${text}`, width));
+			});
+			lines.push("");
+			lines.push(
+				truncateToWidth(
+					`  ${th.fg("dim", "↑↓ 选择 · ←→ 切换布局 · Enter 确认 · Esc 退出")}`,
+					width,
+				),
+			);
+			lines.push("");
+			this.cachedW = width;
+			this.cachedLines = lines;
+			return lines;
+		}
+
+		invalidate(): void {
+			this.cachedW = undefined;
+			this.cachedLines = undefined;
+		}
+	}
+
 	/** 应用布局模式并提示（不写回配置文件；省略 mode 时循环切换 bottom→right→auto） */
 	function applyLayout(ctx: ExtensionContext, mode?: LayoutMode): void {
 		if (mode) {
@@ -1206,32 +1293,22 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			// 无参数：无 UI 环境保持旧行为（切换开关），否则打开交互式菜单
-			if (!ctx.hasUI) {
+			// 无参数：非 TUI 环境保持旧行为（切换开关），TUI 打开交互式菜单
+			if (ctx.mode !== "tui") {
 				toggleStatusbar(ctx);
 				return;
 			}
 			for (;;) {
-				const options = [
-					`布局: ${layoutMode}（点击循环 bottom→right→auto）`,
-					"配置指标显隐…",
-					userWants
-						? "停用自定义状态栏（恢复内置 footer）"
-						: "启用自定义状态栏",
-				];
-				const choice = await ctx.ui.select(
-					"状态栏设置（Esc 退出）",
-					options,
+				const action = await ctx.ui.custom<MenuAction | null>(
+					(_tui, theme, _kb, done) => new StatusbarMenuComponent(theme, done),
 				);
-				if (choice == null) return;
-				if (choice.startsWith("布局:")) {
-					applyLayout(ctx);
-				} else if (choice.startsWith("配置指标显隐")) {
+				if (action == null) return;
+				if (action === "metrics") {
 					await runMetricsPicker(ctx);
-				} else {
-					toggleStatusbar(ctx);
-					return;
+					continue; // 回到菜单可继续操作
 				}
+				toggleStatusbar(ctx);
+				return;
 			}
 		},
 	});
