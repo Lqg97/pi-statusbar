@@ -715,25 +715,30 @@ export default function (pi: ExtensionAPI) {
 
 		// token 用量、缓存命中率与花费
 		const u = computeUsage(ctx);
-		const usageParts = [`↑${fmtTokens(u.input)}`, `↓${fmtTokens(u.output)}`];
+		const inText = `↑${fmtTokens(u.input)}`;
+		const outText = `↓${fmtTokens(u.output)}`;
+		let cacheText = "";
 		if (u.cacheRead > 0) {
 			// 命中率 = 缓存读 / 总输入（未缓存输入 + 缓存读 + 缓存写）
 			const totalIn = u.input + u.cacheRead + u.cacheWrite;
 			const rate = totalIn > 0 ? Math.round((u.cacheRead / totalIn) * 100) : 0;
-			usageParts.push(`⚡${fmtTokens(u.cacheRead)}·${rate}%`);
+			cacheText = `⚡${fmtTokens(u.cacheRead)}·${rate}%`;
 		}
 		const costText = fmtCost(u.cost);
 		if (variant === "panel") {
-			segs.push({
-				label: "Usage",
-				text: theme.fg("muted", usageParts.join(" ")),
-				pri: 2,
-			});
+			// 竖排值列较窄，输入/输出/缓存各占一行，避免长值被截断
+			segs.push({ label: "In", text: theme.fg("muted", inText), pri: 2 });
+			segs.push({ label: "Out", text: theme.fg("muted", outText), pri: 2 });
+			if (cacheText)
+				segs.push({ label: "Cache", text: theme.fg("muted", cacheText), pri: 2 });
 			segs.push({ label: "Cost", text: theme.fg("muted", costText), pri: 2 });
 		} else {
+			const parts = [inText, outText];
+			if (cacheText) parts.push(cacheText);
+			parts.push(costText);
 			segs.push({
 				label: "Usage",
-				text: theme.fg("muted", [...usageParts, costText].join(" ")),
+				text: theme.fg("muted", parts.join(" ")),
 				pri: 2,
 			});
 		}

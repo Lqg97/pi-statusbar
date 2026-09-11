@@ -56,7 +56,7 @@ pi -e git:github.com/Lqg97/pi-statusbar
 }
 ```
 
-**布局说明**：`auto` 模式下终端 ≥120 列时状态收进右侧悬浮竖卡（Branch / Ctx / Model / Usage / Cost / TTFT / Speed / Quota 每行一项，带边框），底部 footer 让位；<120 列时回到单行 footer。右侧面板是**非捕获浮层**：不抢键盘焦点，但会遮住聊天内容右缘（pi 扩展 API 不支持真正的布局分栏）。
+**布局说明**：`auto` 模式下终端 ≥120 列时状态收进右侧悬浮竖卡（Branch / Ctx / Model / In / Out / Cache / Cost / TTFT / Speed / Quota 每行一项，带边框），底部 footer 让位；<120 列时回到单行 footer。右侧面板是**非捕获浮层**：不抢键盘焦点，但会遮住聊天内容右缘（pi 扩展 API 不支持真正的布局分栏）。
 
 **单价自动匹配规则**（未配置 priceMap 时，按顺序取第一个命中）：
 
