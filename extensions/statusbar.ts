@@ -19,7 +19,7 @@
  *   auto 按终端宽度自动选择：≥120 列用右侧面板，否则底部单行，resize 实时切换；
  *   右侧面板为非捕获浮层（不抢键盘焦点），宽度由 rightWidth 配置（默认 32 列）；
  *   注意：面板浮在聊天内容之上，会遮住右缘内容（pi 扩展 API 不支持真布局分栏）；
- *   /statusbar 无参数打开交互式菜单（↑↓ 选择，←→ 实时切换布局，菜单项：指标显隐 / 启停），
+ *   /statusbar 无参数打开交互式菜单（布局 ◀▶ 调值 / 指标显隐 / 启停；Enter 确认，Esc 退出），
  *   或子命令快捷方式：/statusbar [on|off] | layout [right|bottom|auto] | metrics
  * - 新会话默认恢复自定义样式
  * - 用户配置 ~/.pi/agent/statusbar.json（环境变量 PI_STATUSBAR_CONFIG 可覆盖路径）：
@@ -1081,21 +1081,47 @@ export default function (pi: ExtensionAPI) {
 
 	type MenuAction = "metrics" | "toggle";
 
-	/** /statusbar 交互式菜单：↑↓ 选择、←→ 实时切换布局（不作为菜单项外显）、Enter 确认、Esc 退出 */
+	const LAYOUT_LABEL: Record<LayoutMode, string> = {
+		bottom: "底部单行",
+		right: "右侧面板",
+		auto: "自动",
+	};
+	const LAYOUT_ORDER: LayoutMode[] = ["bottom", "right", "auto"];
+
+	/** 菜单头部：─── 标题 ───… */
+	function menuHeader(theme: Theme, title: string, width: number): string {
+		const bar = theme.fg("borderMuted", "─");
+		const t = ` ${theme.fg("accent", title)} `;
+		const rest = bar.repeat(Math.max(0, width - 6 - visibleWidth(t)));
+		return truncateToWidth(`  ${bar.repeat(3)}${t}${rest}`, width);
+	}
+
+	/** 菜单行：光标 + 左文本 + 右对齐值列 */
+	function menuRow(
+		theme: Theme,
+		sel: boolean,
+		left: string,
+		right: string,
+		width: number,
+	): string {
+		const mark = sel ? theme.fg("accent", "❯") : " ";
+		const l = sel ? theme.fg("text", left) : theme.fg("muted", left);
+		const pad = Math.max(
+			1,
+			width - 4 - visibleWidth(left) - visibleWidth(right),
+		);
+		return truncateToWidth(
+			`  ${mark} ${l}${" ".repeat(pad)}${right}`,
+			width,
+		);
+	}
+
+	/** /statusbar 交互式菜单：↑↓ 选择、布局行 ←→ 调值、Enter 确认、Esc 退出 */
 	class StatusbarMenuComponent {
 		private sel = 0;
 		private cachedW?: number;
 		private cachedLines?: string[];
-		private readonly items: { text: () => string; action: MenuAction }[] = [
-			{ text: () => "配置指标显隐…", action: "metrics" },
-			{
-				text: () =>
-					userWants
-						? "停用自定义状态栏（恢复内置 footer）"
-						: "启用自定义状态栏",
-				action: "toggle",
-			},
-		];
+		private static readonly ROWS = 3;
 
 		constructor(
 			private theme: Theme,
@@ -1103,53 +1129,158 @@ export default function (pi: ExtensionAPI) {
 		) {}
 
 		private cycleLayout(dir: 1 | -1): void {
-			const ORDER: LayoutMode[] = ["bottom", "right", "auto"];
-			const i = ORDER.indexOf(layoutMode);
-			layoutMode = ORDER[(i + dir + ORDER.length) % ORDER.length];
+			const i = LAYOUT_ORDER.indexOf(layoutMode);
+			layoutMode =
+				LAYOUT_ORDER[(i + dir + LAYOUT_ORDER.length) % LAYOUT_ORDER.length];
 			if (userWants) activeTui?.requestRender();
 			this.invalidate();
 		}
 
 		handleInput(data: string): void {
+			const N = StatusbarMenuComponent.ROWS;
 			if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c"))
 				return this.close(null);
 			if (matchesKey(data, "up")) {
-				this.sel = (this.sel + this.items.length - 1) % this.items.length;
+				this.sel = (this.sel + N - 1) % N;
 				this.invalidate();
 				return;
 			}
 			if (matchesKey(data, "down")) {
-				this.sel = (this.sel + 1) % this.items.length;
+				this.sel = (this.sel + 1) % N;
 				this.invalidate();
 				return;
 			}
-			if (matchesKey(data, "left")) return this.cycleLayout(-1);
-			if (matchesKey(data, "right")) return this.cycleLayout(1);
-			if (matchesKey(data, "return"))
-				return this.close(this.items[this.sel].action);
+			if (matchesKey(data, "left") && this.sel === 0) return this.cycleLayout(-1);
+			if (matchesKey(data, "right") && this.sel === 0) return this.cycleLayout(1);
+			if (matchesKey(data, "return")) {
+				if (this.sel === 1) return this.close("metrics");
+				if (this.sel === 2) return this.close("toggle");
+				return this.close(null); // 布局行：已实时生效，Enter 即完成退出
+			}
 		}
 
 		render(width: number): string[] {
 			if (this.cachedLines && this.cachedW === width) return this.cachedLines;
 			const th = this.theme;
-			const lines: string[] = [""];
+			const lines: string[] = ["", menuHeader(th, "状态栏设置", width), ""];
+			// 行 0：布局（值两侧 ◀ ▶ 提示可左右调节）
+			const s0 = this.sel === 0;
+			const arrow = (d: string) =>
+				s0 ? th.fg("accent", d) : th.fg("dim", d);
+			const val = th.fg(
+				s0 ? "accent" : "muted",
+				LAYOUT_LABEL[layoutMode],
+			);
 			lines.push(
-				truncateToWidth(
-					`  ${th.fg("accent", "状态栏设置")}  ${th.fg("dim", `布局 ${layoutMode}`)}`,
+				menuRow(th, s0, "布局", `${arrow("◀")} ${val} ${arrow("▶")}`, width),
+			);
+			// 行 1：指标显隐（显示计数）
+			const hiddenCount = config.hiddenMetrics.length;
+			lines.push(
+				menuRow(
+					th,
+					this.sel === 1,
+					"指标显隐",
+					th.fg(
+						hiddenCount ? "warning" : "muted",
+						`${METRICS.length - hiddenCount}/${METRICS.length} 显示`,
+					),
+					width,
+				),
+			);
+			// 行 2：启用/停用
+			lines.push(
+				menuRow(
+					th,
+					this.sel === 2,
+					userWants ? "停用自定义状态栏" : "启用自定义状态栏",
+					"",
 					width,
 				),
 			);
 			lines.push("");
-			this.items.forEach((it, i) => {
+			lines.push(
+				truncateToWidth(
+					`  ${th.fg("dim", "↑↓ 选择 · ←→ 调整 · Enter 确认 · Esc 退出")}`,
+					width,
+				),
+			);
+			lines.push("");
+			this.cachedW = width;
+			this.cachedLines = lines;
+			return lines;
+		}
+
+		invalidate(): void {
+			this.cachedW = undefined;
+			this.cachedLines = undefined;
+		}
+	}
+
+	/** 指标显隐选择器：↑↓ 选择、Space 切换、Enter 保存、Esc 取消 */
+	class MetricsPickerComponent {
+		private sel = 0;
+		private hidden: Set<MetricKey>;
+		private cachedW?: number;
+		private cachedLines?: string[];
+
+		constructor(
+			private theme: Theme,
+			initHidden: MetricKey[],
+			private onPreview: (keys: MetricKey[]) => void,
+			private close: (saved: boolean) => void,
+		) {
+			this.hidden = new Set(initHidden);
+		}
+
+		private keys(): MetricKey[] {
+			return METRICS.filter((m) => this.hidden.has(m.key)).map((m) => m.key);
+		}
+
+		handleInput(data: string): void {
+			if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c"))
+				return this.close(false);
+			if (matchesKey(data, "up")) {
+				this.sel = (this.sel + METRICS.length - 1) % METRICS.length;
+				this.invalidate();
+				return;
+			}
+			if (matchesKey(data, "down")) {
+				this.sel = (this.sel + 1) % METRICS.length;
+				this.invalidate();
+				return;
+			}
+			if (matchesKey(data, "space")) {
+				const k = METRICS[this.sel].key;
+				if (this.hidden.has(k)) this.hidden.delete(k);
+				else this.hidden.add(k);
+				this.onPreview(this.keys()); // 即时预览，Esc 可回退
+				this.invalidate();
+				return;
+			}
+			if (matchesKey(data, "return")) return this.close(true);
+		}
+
+		render(width: number): string[] {
+			if (this.cachedLines && this.cachedW === width) return this.cachedLines;
+			const th = this.theme;
+			const lines: string[] = ["", menuHeader(th, "指标显隐", width), ""];
+			METRICS.forEach((m, i) => {
 				const cur = i === this.sel;
+				const shown = !this.hidden.has(m.key);
 				const mark = cur ? th.fg("accent", "❯") : " ";
-				const text = cur ? th.fg("text", it.text()) : th.fg("muted", it.text());
-				lines.push(truncateToWidth(`  ${mark} ${text}`, width));
+				const icon = shown ? th.fg("success", "●") : th.fg("dim", "○");
+				const text = !shown
+					? th.fg("dim", m.name)
+					: cur
+						? th.fg("text", m.name)
+						: th.fg("muted", m.name);
+				lines.push(truncateToWidth(`  ${mark} ${icon} ${text}`, width));
 			});
 			lines.push("");
 			lines.push(
 				truncateToWidth(
-					`  ${th.fg("dim", "↑↓ 选择 · ←→ 切换布局 · Enter 确认 · Esc 退出")}`,
+					`  ${th.fg("dim", "↑↓ 选择 · Space 切换 · Enter 保存 · Esc 取消")}`,
 					width,
 				),
 			);
@@ -1200,7 +1331,7 @@ export default function (pi: ExtensionAPI) {
 
 	/** 交互式指标显隐选择器；保存返回 true，取消返回 false */
 	async function runMetricsPicker(ctx: ExtensionContext): Promise<boolean> {
-		if (!ctx.hasUI) {
+		if (ctx.mode !== "tui") {
 			ctx.ui.notify(
 				"当前模式不支持交互式配置，请直接改配置文件的 hiddenMetrics",
 				"warning",
@@ -1208,40 +1339,32 @@ export default function (pi: ExtensionAPI) {
 			return false;
 		}
 		const orig = config.hiddenMetrics;
-		const hidden = new Set<MetricKey>(orig);
-		const DONE = "✔ 完成（保存到配置文件）";
-		for (;;) {
-			const options = [
-				...METRICS.map((m) => `${hidden.has(m.key) ? "☐" : "☑"} ${m.name}`),
-				DONE,
-			];
-			const choice = await ctx.ui.select(
-				"状态栏指标配置（选择切换 ☑显示/☐隐藏，Esc 取消不保存）",
-				options,
-			);
-			if (choice == null) {
-				// 取消：回退未保存的预览改动
-				config.hiddenMetrics = orig;
-				if (userWants) activeTui?.requestRender();
-				ctx.ui.notify("已取消，配置未保存", "info");
-				return false;
-			}
-			if (choice === DONE) break;
-			const m = METRICS.find((_, i) => options[i] === choice);
-			if (!m) continue;
-			if (hidden.has(m.key)) hidden.delete(m.key);
-			else hidden.add(m.key);
-			// 即时预览（未保存，Esc 可回退）
-			config.hiddenMetrics = [...hidden];
+		const saved = await ctx.ui.custom<boolean>(
+			(_tui, theme, _kb, done) =>
+				new MetricsPickerComponent(
+					theme,
+					orig,
+					(keys) => {
+						config.hiddenMetrics = keys; // 即时预览
+						if (userWants) activeTui?.requestRender();
+					},
+					done,
+				),
+		);
+		if (!saved) {
+			// 取消：回退未保存的预览改动
+			config.hiddenMetrics = orig;
 			if (userWants) activeTui?.requestRender();
+			ctx.ui.notify("已取消，配置未保存", "info");
+			return false;
 		}
-		const keys = METRICS.filter((m) => hidden.has(m.key)).map((m) => m.key);
+		const keys = config.hiddenMetrics;
 		try {
 			saveHiddenMetrics(keys);
 			ctx.ui.notify(
 				keys.length === 0
 					? "已保存：显示全部指标"
-					: `已保存：隐藏 ${keys.join("、")}（注意：配置文件中的注释会被去除）`,
+					: `已保存：隐藏 ${keys.join("、")}`,
 				"info",
 			);
 		} catch (e) {

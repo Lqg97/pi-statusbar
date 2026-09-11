@@ -75,7 +75,7 @@ pi -e git:github.com/Lqg97/pi-statusbar
 
 | 命令 | 说明 |
 | --- | --- |
-| `/statusbar` | 无参数打开交互式菜单：↑↓ 选择、←→ 实时切换布局（bottom/right/auto）、Enter 确认、Esc 退出；菜单项：指标显隐配置（☑/☐ 切换、即时预览、✔ 保存）/ 启用停用自定义状态栏 |
+| `/statusbar` | 无参数打开交互式菜单：布局（光标在布局行时 ←→ 调值，实时预览）/ 指标显隐（↑↓ 选择、Space 切换、Enter 保存、Esc 取消）/ 启用停用；Enter 确认、Esc 退出 |
 | `/statusbar on\|off` | 启用 / 停用自定义状态栏（停用后恢复内置 footer） |
 | `/statusbar layout [right\|bottom\|auto]` | 切换布局，不带参数时循环切换，即时生效（不写回配置文件） |
 | `/statusbar metrics` | 直接进入指标显隐交互式配置 |
