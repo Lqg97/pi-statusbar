@@ -29,6 +29,7 @@
  *     rightWidth       右侧面板宽度，默认 32，范围 [20, 60]
  *     hiddenMetrics    隐藏的指标 key 数组，可选：branch/ctx/model/effort/usage/ttft/speed/quota/ext；
  *                      也可用 /statusbar metrics 交互式配置（会写回此字段）
+ *     language         配置面板显示语言 "zh" | "en"（默认 "zh"）；/statusbar 菜单语言行 ←→ 切换并即时写回
  *   未配置 priceMap 时按模型 id 在 models.dev 全量中自动匹配（同名取最便宜），零配置可用；
  *   配置在新会话时重读，改完开新会话即生效
  */
@@ -104,7 +105,12 @@ interface StatusbarConfig {
 	rightWidth: number;
 	/** 隐藏的指标 key 列表（默认全部显示），/statusbar metrics 交互式配置 */
 	hiddenMetrics: MetricKey[];
+	/** 配置面板显示语言，默认 zh；/statusbar 菜单语言行 ←→ 切换（即时写回配置文件） */
+	language: Lang;
 }
+
+/** 配置面板语言 */
+type Lang = "zh" | "en";
 
 /** 可配置显隐的指标 */
 type MetricKey =
@@ -118,17 +124,67 @@ type MetricKey =
 	| "quota"
 	| "ext";
 
-const METRICS: { key: MetricKey; name: string }[] = [
-	{ key: "branch", name: "分支 / 目录" },
-	{ key: "ctx", name: "上下文占用" },
-	{ key: "model", name: "模型名" },
-	{ key: "effort", name: "思考强度 effort（仅右侧面板分行显示）" },
-	{ key: "usage", name: "token 用量 / 缓存 / 花费" },
-	{ key: "ttft", name: "首 token 耗时 TTFT" },
-	{ key: "speed", name: "输出吞吐 tok/s" },
-	{ key: "quota", name: "订阅额度" },
-	{ key: "ext", name: "其他扩展状态" },
+const METRICS: { key: MetricKey; zh: string; en: string }[] = [
+	{ key: "branch", zh: "分支 / 目录", en: "Branch / Dir" },
+	{ key: "ctx", zh: "上下文占用", en: "Context usage" },
+	{ key: "model", zh: "模型名", en: "Model" },
+	{ key: "effort", zh: "思考强度 effort（仅右侧面板）", en: "Effort (right panel only)" },
+	{ key: "usage", zh: "token 用量 / 缓存 / 花费", en: "Tokens / cache / cost" },
+	{ key: "ttft", zh: "首 token 耗时 TTFT", en: "TTFT" },
+	{ key: "speed", zh: "输出吞吐 tok/s", en: "Speed tok/s" },
+	{ key: "quota", zh: "订阅额度", en: "Quota" },
+	{ key: "ext", zh: "其他扩展状态", en: "Extension statuses" },
 ];
+
+const LAYOUT_ORDER: LayoutMode[] = ["bottom", "right", "auto"];
+const LAYOUT_LABELS: Record<Lang, Record<LayoutMode, string>> = {
+	zh: { bottom: "底部单行", right: "右侧面板", auto: "自动" },
+	en: { bottom: "Bottom", right: "Right panel", auto: "Auto" },
+};
+const LANG_LABELS: Record<Lang, string> = { zh: "中文", en: "English" };
+
+/** 配置面板（菜单/指标选择器）双语文案 */
+const UI_TEXT = {
+	zh: {
+		menuTitle: "状态栏设置",
+		rowLayout: "布局",
+		rowLang: "语言",
+		rowMetrics: "指标显隐",
+		rowDisable: "停用自定义状态栏",
+		rowEnable: "启用自定义状态栏",
+		metricsCount: (n: number, total: number) => `${n}/${total} 显示`,
+		menuHint: "↑↓ 选择 · ←→ 调整 · Enter 确认 · Esc 退出",
+		pickerTitle: "指标显隐",
+		pickerHint: "↑↓ 选择 · Space 切换 · Enter 保存 · Esc 取消",
+		savedAll: "已保存：显示全部指标",
+		savedHidden: (keys: string) => `已保存：隐藏 ${keys}`,
+		saveFailed: (e: unknown) => `写入配置文件失败: ${e}`,
+		canceled: "已取消，配置未保存",
+		noTui: "当前模式不支持交互式配置，请直接改配置文件",
+	},
+	en: {
+		menuTitle: "Statusbar Settings",
+		rowLayout: "Layout",
+		rowLang: "Language",
+		rowMetrics: "Metrics",
+		rowDisable: "Disable custom statusbar",
+		rowEnable: "Enable custom statusbar",
+		metricsCount: (n: number, total: number) => `${n}/${total} shown`,
+		menuHint: "↑↓ select · ←→ adjust · Enter confirm · Esc exit",
+		pickerTitle: "Metrics",
+		pickerHint: "↑↓ select · Space toggle · Enter save · Esc cancel",
+		savedAll: "Saved: all metrics shown",
+		savedHidden: (keys: string) => `Saved: hidden ${keys}`,
+		saveFailed: (e: unknown) => `Failed to write config: ${e}`,
+		canceled: "Cancelled, not saved",
+		noTui: "Interactive config requires TUI mode; edit the config file instead",
+	},
+} as const;
+
+/** 当前语言的配置面板文案 */
+const t = (): (typeof UI_TEXT)["zh"] => UI_TEXT[config.language];
+/** 指标名（跟随当前语言） */
+const metricName = (m: (typeof METRICS)[number]): string => m[config.language];
 
 function toMetricKeys(v: unknown): MetricKey[] {
 	if (!Array.isArray(v)) return [];
@@ -151,6 +207,10 @@ function toLayoutMode(v: unknown): LayoutMode {
 function toRightWidth(v: unknown): number {
 	if (typeof v !== "number" || !Number.isFinite(v)) return DEFAULT_RIGHT_WIDTH;
 	return Math.min(60, Math.max(20, Math.round(v)));
+}
+
+function toLang(v: unknown): Lang {
+	return v === "en" ? "en" : "zh";
 }
 
 /** 去除 jsonc 行注释（保留字符串内的 //，如 URL） */
@@ -182,6 +242,7 @@ function loadConfig(): StatusbarConfig {
 			layout: toLayoutMode(raw?.layout),
 			rightWidth: toRightWidth(raw?.rightWidth),
 			hiddenMetrics: toMetricKeys(raw?.hiddenMetrics),
+			language: toLang(raw?.language),
 		};
 	} catch {
 		return {
@@ -190,27 +251,29 @@ function loadConfig(): StatusbarConfig {
 			layout: DEFAULT_LAYOUT,
 			rightWidth: DEFAULT_RIGHT_WIDTH,
 			hiddenMetrics: [],
+			language: "zh",
 		};
 	}
 }
 
-/** 保存 hiddenMetrics 到配置文件（保留其他字段；会去除 jsonc 注释） */
-function saveHiddenMetrics(keys: MetricKey[]): void {
+/** 将字段补丁写回配置文件（保留其他字段；会去除 jsonc 注释）。
+ *  文件缺失或损坏时基于当前生效配置重建。调用方自行更新内存 config。 */
+function saveConfigPatch(patch: Record<string, unknown>): void {
 	let raw: Record<string, unknown> = {};
 	try {
 		raw = JSON.parse(stripJsonComments(readFileSync(CONFIG_FILE, "utf8")));
 	} catch {
-		// 文件缺失或损坏：基于当前生效配置重建
 		raw = {
 			priceMap: config.priceMap,
 			hideExtStatuses: config.hideExtStatuses,
 			layout: config.layout,
 			rightWidth: config.rightWidth,
+			hiddenMetrics: config.hiddenMetrics,
+			language: config.language,
 		};
 	}
-	raw.hiddenMetrics = keys;
+	Object.assign(raw, patch);
 	writeFileSync(CONFIG_FILE, JSON.stringify(raw, null, "\t") + "\n");
-	config.hiddenMetrics = keys;
 }
 
 let config = loadConfig();
@@ -1081,47 +1144,44 @@ export default function (pi: ExtensionAPI) {
 
 	type MenuAction = "metrics" | "toggle";
 
-	const LAYOUT_LABEL: Record<LayoutMode, string> = {
-		bottom: "底部单行",
-		right: "右侧面板",
-		auto: "自动",
-	};
-	const LAYOUT_ORDER: LayoutMode[] = ["bottom", "right", "auto"];
+	/** 将一块输入拆分为独立按键序列（终端快速按键可能合并为单个 data 块送达） */
+	function splitKeySeqs(data: string): string[] {
+		return (
+			data.match(
+				/\x1b\[[0-9;]*[a-zA-Z]|\x1bO[A-Za-z]|\x1b[A-Za-z]|\x1b|\r|\n|[\s\S]/g,
+			) ?? [data]
+		);
+	}
 
 	/** 菜单头部：─── 标题 ───… */
 	function menuHeader(theme: Theme, title: string, width: number): string {
 		const bar = theme.fg("borderMuted", "─");
-		const t = ` ${theme.fg("accent", title)} `;
-		const rest = bar.repeat(Math.max(0, width - 6 - visibleWidth(t)));
-		return truncateToWidth(`  ${bar.repeat(3)}${t}${rest}`, width);
+		const tt = ` ${theme.fg("accent", title)} `;
+		const rest = bar.repeat(Math.max(0, width - 6 - visibleWidth(tt)));
+		return truncateToWidth(`  ${bar.repeat(3)}${tt}${rest}`, width);
 	}
 
-	/** 菜单行：光标 + 左文本 + 右对齐值列 */
+	/** 菜单行：光标 + 标签（固定列宽，值紧跟其后） + 值 */
 	function menuRow(
 		theme: Theme,
 		sel: boolean,
 		left: string,
 		right: string,
+		labelCol: number,
 		width: number,
 	): string {
 		const mark = sel ? theme.fg("accent", "❯") : " ";
 		const l = sel ? theme.fg("text", left) : theme.fg("muted", left);
-		const pad = Math.max(
-			1,
-			width - 4 - visibleWidth(left) - visibleWidth(right),
-		);
-		return truncateToWidth(
-			`  ${mark} ${l}${" ".repeat(pad)}${right}`,
-			width,
-		);
+		const pad = Math.max(2, labelCol - visibleWidth(left));
+		return truncateToWidth(`  ${mark} ${l}${" ".repeat(pad)}${right}`, width);
 	}
 
-	/** /statusbar 交互式菜单：↑↓ 选择、布局行 ←→ 调值、Enter 确认、Esc 退出 */
+	/** /statusbar 交互式菜单：↑↓ 选择，布局/语言行 ←→ 调值，Enter 确认，Esc 退出 */
 	class StatusbarMenuComponent {
 		private sel = 0;
 		private cachedW?: number;
 		private cachedLines?: string[];
-		private static readonly ROWS = 3;
+		private static readonly ROWS = 4;
 
 		constructor(
 			private theme: Theme,
@@ -1136,7 +1196,22 @@ export default function (pi: ExtensionAPI) {
 			this.invalidate();
 		}
 
+		/** 切换中英文（即时写回配置文件，菜单文案实时切换） */
+		private cycleLang(): void {
+			config.language = config.language === "zh" ? "en" : "zh";
+			try {
+				saveConfigPatch({ language: config.language });
+			} catch {
+				// 写入失败不影响本次会话内的显示
+			}
+			this.invalidate();
+		}
+
 		handleInput(data: string): void {
+			for (const seq of splitKeySeqs(data)) this.handleKey(seq);
+		}
+
+		private handleKey(data: string): void {
 			const N = StatusbarMenuComponent.ROWS;
 			if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c"))
 				return this.close(null);
@@ -1150,60 +1225,84 @@ export default function (pi: ExtensionAPI) {
 				this.invalidate();
 				return;
 			}
-			if (matchesKey(data, "left") && this.sel === 0) return this.cycleLayout(-1);
-			if (matchesKey(data, "right") && this.sel === 0) return this.cycleLayout(1);
+			if (matchesKey(data, "left")) {
+				if (this.sel === 0) return this.cycleLayout(-1);
+				if (this.sel === 1) return this.cycleLang();
+			}
+			if (matchesKey(data, "right")) {
+				if (this.sel === 0) return this.cycleLayout(1);
+				if (this.sel === 1) return this.cycleLang();
+			}
 			if (matchesKey(data, "return")) {
-				if (this.sel === 1) return this.close("metrics");
-				if (this.sel === 2) return this.close("toggle");
-				return this.close(null); // 布局行：已实时生效，Enter 即完成退出
+				if (this.sel === 2) return this.close("metrics");
+				if (this.sel === 3) return this.close("toggle");
+				return this.close(null); // 布局/语言行：已实时生效，Enter 即完成退出
 			}
 		}
 
 		render(width: number): string[] {
 			if (this.cachedLines && this.cachedW === width) return this.cachedLines;
 			const th = this.theme;
-			const lines: string[] = ["", menuHeader(th, "状态栏设置", width), ""];
-			// 行 0：布局（值两侧 ◀ ▶ 提示可左右调节）
-			const s0 = this.sel === 0;
-			const arrow = (d: string) =>
-				s0 ? th.fg("accent", d) : th.fg("dim", d);
-			const val = th.fg(
-				s0 ? "accent" : "muted",
-				LAYOUT_LABEL[layoutMode],
-			);
+			const T = t();
+			const lines: string[] = ["", menuHeader(th, T.menuTitle, width), ""];
+			const labels = [
+				T.rowLayout,
+				T.rowLang,
+				T.rowMetrics,
+				userWants ? T.rowDisable : T.rowEnable,
+			];
+			// 值列紧跟标签：固定列宽 = 最长标签 + 3，不再贴右边缘
+			const labelCol = Math.max(...labels.map((l) => visibleWidth(l))) + 3;
+			// 可调值：两侧 ◀ ▶，选中行高亮
+			const adjustable = (on: boolean, text: string) =>
+				on
+					? `${th.fg("accent", "◀")} ${th.fg("accent", text)} ${th.fg("accent", "▶")}`
+					: `${th.fg("dim", "◀")} ${th.fg("muted", text)} ${th.fg("dim", "▶")}`;
+			// 行 0：布局
 			lines.push(
-				menuRow(th, s0, "布局", `${arrow("◀")} ${val} ${arrow("▶")}`, width),
+				menuRow(
+					th,
+					this.sel === 0,
+					labels[0],
+					adjustable(
+						this.sel === 0,
+						LAYOUT_LABELS[config.language][layoutMode],
+					),
+					labelCol,
+					width,
+				),
 			);
-			// 行 1：指标显隐（显示计数）
-			const hiddenCount = config.hiddenMetrics.length;
+			// 行 1：语言
 			lines.push(
 				menuRow(
 					th,
 					this.sel === 1,
-					"指标显隐",
-					th.fg(
-						hiddenCount ? "warning" : "muted",
-						`${METRICS.length - hiddenCount}/${METRICS.length} 显示`,
-					),
+					labels[1],
+					adjustable(this.sel === 1, LANG_LABELS[config.language]),
+					labelCol,
 					width,
 				),
 			);
-			// 行 2：启用/停用
+			// 行 2：指标显隐（显示计数）
+			const hiddenCount = config.hiddenMetrics.length;
 			lines.push(
 				menuRow(
 					th,
 					this.sel === 2,
-					userWants ? "停用自定义状态栏" : "启用自定义状态栏",
-					"",
+					labels[2],
+					th.fg(
+						hiddenCount ? "warning" : "muted",
+						T.metricsCount(METRICS.length - hiddenCount, METRICS.length),
+					),
+					labelCol,
 					width,
 				),
 			);
+			// 行 3：启用/停用
+			lines.push(menuRow(th, this.sel === 3, labels[3], "", labelCol, width));
 			lines.push("");
 			lines.push(
-				truncateToWidth(
-					`  ${th.fg("dim", "↑↓ 选择 · ←→ 调整 · Enter 确认 · Esc 退出")}`,
-					width,
-				),
+				truncateToWidth(`  ${th.fg("dim", T.menuHint)}`, width),
 			);
 			lines.push("");
 			this.cachedW = width;
@@ -1238,6 +1337,10 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		handleInput(data: string): void {
+			for (const seq of splitKeySeqs(data)) this.handleKey(seq);
+		}
+
+		private handleKey(data: string): void {
 			if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c"))
 				return this.close(false);
 			if (matchesKey(data, "up")) {
@@ -1264,25 +1367,24 @@ export default function (pi: ExtensionAPI) {
 		render(width: number): string[] {
 			if (this.cachedLines && this.cachedW === width) return this.cachedLines;
 			const th = this.theme;
-			const lines: string[] = ["", menuHeader(th, "指标显隐", width), ""];
+			const T = t();
+			const lines: string[] = ["", menuHeader(th, T.pickerTitle, width), ""];
 			METRICS.forEach((m, i) => {
 				const cur = i === this.sel;
 				const shown = !this.hidden.has(m.key);
+				const name = metricName(m);
 				const mark = cur ? th.fg("accent", "❯") : " ";
 				const icon = shown ? th.fg("success", "●") : th.fg("dim", "○");
 				const text = !shown
-					? th.fg("dim", m.name)
+					? th.fg("dim", name)
 					: cur
-						? th.fg("text", m.name)
-						: th.fg("muted", m.name);
+						? th.fg("text", name)
+						: th.fg("muted", name);
 				lines.push(truncateToWidth(`  ${mark} ${icon} ${text}`, width));
 			});
 			lines.push("");
 			lines.push(
-				truncateToWidth(
-					`  ${th.fg("dim", "↑↓ 选择 · Space 切换 · Enter 保存 · Esc 取消")}`,
-					width,
-				),
+				truncateToWidth(`  ${th.fg("dim", T.pickerHint)}`, width),
 			);
 			lines.push("");
 			this.cachedW = width;
@@ -1332,10 +1434,7 @@ export default function (pi: ExtensionAPI) {
 	/** 交互式指标显隐选择器；保存返回 true，取消返回 false */
 	async function runMetricsPicker(ctx: ExtensionContext): Promise<boolean> {
 		if (ctx.mode !== "tui") {
-			ctx.ui.notify(
-				"当前模式不支持交互式配置，请直接改配置文件的 hiddenMetrics",
-				"warning",
-			);
+			ctx.ui.notify(t().noTui, "warning");
 			return false;
 		}
 		const orig = config.hiddenMetrics;
@@ -1355,20 +1454,21 @@ export default function (pi: ExtensionAPI) {
 			// 取消：回退未保存的预览改动
 			config.hiddenMetrics = orig;
 			if (userWants) activeTui?.requestRender();
-			ctx.ui.notify("已取消，配置未保存", "info");
+			ctx.ui.notify(t().canceled, "info");
 			return false;
 		}
 		const keys = config.hiddenMetrics;
 		try {
-			saveHiddenMetrics(keys);
+			saveConfigPatch({ hiddenMetrics: keys });
+			const T = t();
 			ctx.ui.notify(
 				keys.length === 0
-					? "已保存：显示全部指标"
-					: `已保存：隐藏 ${keys.join("、")}`,
+					? T.savedAll
+					: T.savedHidden(keys.join(config.language === "zh" ? "、" : ", ")),
 				"info",
 			);
 		} catch (e) {
-			ctx.ui.notify(`写入配置文件失败: ${e}`, "error");
+			ctx.ui.notify(t().saveFailed(e), "error");
 			return false;
 		}
 		if (userWants) activeTui?.requestRender();

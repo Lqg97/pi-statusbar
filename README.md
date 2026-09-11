@@ -21,6 +21,7 @@ main │ ↑12.3k ↓45.6k ⚡100k·85% $0.123 ⏱980ms 128 tok/s │ ▰▰▰�
 - **窄终端自适应**：按 扩展状态 → 额度/token → 模型 的顺序逐段收起，仍放不下时整段换行成多行（分支与上下文永不丢弃）
 - **布局可选（layout）**：`bottom` 底部单行 / `right` 右侧悬浮竖卡面板（Model 与 Effort 分行显示，超长自动换行不截断）/ `auto`（默认）按终端宽度自动选择（≥120 列用右侧面板），拖拽 resize 实时切换
 - **指标显隐可配置**：交互式勾选要展示的指标（分支 / 上下文 / 模型 / effort / 用量 / TTFT / 吞吐 / 额度 / 扩展状态），即时预览，保存写回配置文件 `hiddenMetrics` 字段
+- **配置面板中英双语**：`language` 配置项或菜单内 ←→ 实时切换，菜单/指标选择器/提示文案跟随语言
 - **单一命令 `/statusbar`**：无参数打开交互式菜单（布局切换 / 指标显隐 / 启用停用），也支持子命令快捷方式；新会话默认恢复自定义样式
 
 ## 安装
@@ -56,7 +57,9 @@ pi -e git:github.com/Lqg97/pi-statusbar
  "rightWidth": 32,
  // 隐藏的指标（可选：branch/ctx/model/effort/usage/ttft/speed/quota/ext），默认全部显示
  // 也可用 /statusbar metrics 交互式配置（会写回此字段）
- "hiddenMetrics": ["ttft"]
+ "hiddenMetrics": ["ttft"],
+ // 配置面板显示语言："zh" / "en"（默认 zh），/statusbar 菜单语言行 ←→ 切换
+ "language": "zh"
 }
 ```
 
@@ -75,7 +78,7 @@ pi -e git:github.com/Lqg97/pi-statusbar
 
 | 命令 | 说明 |
 | --- | --- |
-| `/statusbar` | 无参数打开交互式菜单：布局（光标在布局行时 ←→ 调值，实时预览）/ 指标显隐（↑↓ 选择、Space 切换、Enter 保存、Esc 取消）/ 启用停用；Enter 确认、Esc 退出 |
+| `/statusbar` | 无参数打开交互式菜单：布局 / 语言（光标在对应行时 ←→ 调值，布局实时预览、语言即时保存）/ 指标显隐（↑↓ 选择、Space 切换、Enter 保存、Esc 取消）/ 启用停用；Enter 确认、Esc 退出 |
 | `/statusbar on\|off` | 启用 / 停用自定义状态栏（停用后恢复内置 footer） |
 | `/statusbar layout [right\|bottom\|auto]` | 切换布局，不带参数时循环切换，即时生效（不写回配置文件） |
 | `/statusbar metrics` | 直接进入指标显隐交互式配置 |
