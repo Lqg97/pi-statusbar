@@ -15,10 +15,17 @@
  *     OpenRouter 额度（openrouter.ai）           → 剩余 credits
  *   带 TTL 缓存，失败静默；/quota 强制刷新并显示详情
  * - 窄终端按 扩展状态 → 额度/token → 模型 的顺序收起，始终保留分支与上下文
+ * - 布局可配置（layout）：bottom 底部单行 / right 右侧悬浮竖卡面板 / auto（默认）
+ *   auto 按终端宽度自动选择：≥120 列用右侧面板，否则底部单行，resize 实时切换；
+ *   右侧面板为非捕获浮层（不抢键盘焦点），宽度由 rightWidth 配置（默认 28 列）；
+ *   注意：面板浮在聊天内容之上，会遮住右缘内容（pi 扩展 API 不支持真布局分栏）；
+ *   /statusbar-layout [right|bottom|auto] 运行时切换，不带参数循环
  * - /statusbar 切换回内置 footer，新会话默认恢复自定义样式
  * - 用户配置 ~/.pi/agent/statusbar.json（环境变量 PI_STATUSBAR_CONFIG 可覆盖路径）：
  *     priceMap         本地模型 → models.dev 单价映射，key 为 "provider:model" 或裸 "model"
  *     hideExtStatuses  按文本包含隐藏的其他扩展状态（默认 ["LSP Inactive"]）
+ *     layout           "bottom" | "right" | "auto"（默认 "auto"）
+ *     rightWidth       右侧面板宽度，默认 28，范围 [20, 60]
  *   未配置 priceMap 时按模型 id 在 models.dev 全量中自动匹配（同名取最便宜），零配置可用；
  *   配置在新会话时重读，改完开新会话即生效
  */
@@ -26,10 +33,13 @@ import type { AssistantMessage, ModelCost } from "@earendil-works/pi-ai";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
+	ReadonlyFooterDataProvider,
+	Theme,
 } from "@earendil-works/pi-coding-agent";
 import {
 	truncateToWidth,
 	visibleWidth,
+	type Component,
 	type TUI,
 } from "@earendil-works/pi-tui";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -45,8 +55,9 @@ interface UsageStats {
 	cost: number;
 }
 
-/** footer 渲染段：pri 越大，窄终端下越先被丢弃 */
+/** 渲染段：pri 越大，窄终端下越先被丢弃；label 仅在右侧面板竖排展示时使用 */
 interface Segment {
+	label: string;
 	text: string;
 	pri: number;
 	color?: string;
@@ -71,6 +82,9 @@ interface QuotaSource {
 
 // ---------- 用户配置（~/.pi/agent/statusbar.json，环境变量 PI_STATUSBAR_CONFIG 可覆盖路径） ----------
 
+/** 状态栏布局：bottom 底部单行 / right 右侧悬浮面板 / auto 按终端宽度自动选择 */
+type LayoutMode = "bottom" | "right" | "auto";
+
 interface StatusbarConfig {
 	/** 本地模型 → models.dev 单价映射：key 为本地 "provider:model" 或裸 "model"，value 为 [models.dev provider, 模型 id] */
 	priceMap: Record<string, [string, string]>;
@@ -78,11 +92,28 @@ interface StatusbarConfig {
 	 *  默认隐藏 pi-lens 的 "LSP Inactive"（未编辑代码时的被动状态），保留 LSP Active / Failed 等有信息量的状态。
 	 */
 	hideExtStatuses: string[];
+	/** 布局模式，默认 auto：终端 ≥120 列时右侧面板，否则底部单行 */
+	layout: LayoutMode;
+	/** 右侧面板宽度（列），默认 28，读取时 clamp 到 [20, 60] */
+	rightWidth: number;
 }
 
 const CONFIG_FILE =
 	process.env.PI_STATUSBAR_CONFIG || join(homedir(), ".pi/agent/statusbar.json");
 const DEFAULT_HIDE_EXT_STATUSES = ["LSP Inactive"];
+const DEFAULT_LAYOUT: LayoutMode = "auto";
+const DEFAULT_RIGHT_WIDTH = 28;
+/** auto 模式阈值：终端列数 ≥ 该值时使用右侧面板 */
+const AUTO_MIN_WIDTH = 120;
+
+function toLayoutMode(v: unknown): LayoutMode {
+	return v === "bottom" || v === "right" || v === "auto" ? v : DEFAULT_LAYOUT;
+}
+
+function toRightWidth(v: unknown): number {
+	if (typeof v !== "number" || !Number.isFinite(v)) return DEFAULT_RIGHT_WIDTH;
+	return Math.min(60, Math.max(20, Math.round(v)));
+}
 
 /** 读取配置；文件缺失或损坏时回落默认值（新会话时重读，改完配置开新会话即生效） */
 function loadConfig(): StatusbarConfig {
@@ -93,9 +124,16 @@ function loadConfig(): StatusbarConfig {
 			hideExtStatuses: Array.isArray(raw?.hideExtStatuses)
 				? raw.hideExtStatuses
 				: [...DEFAULT_HIDE_EXT_STATUSES],
+			layout: toLayoutMode(raw?.layout),
+			rightWidth: toRightWidth(raw?.rightWidth),
 		};
 	} catch {
-		return { priceMap: {}, hideExtStatuses: [...DEFAULT_HIDE_EXT_STATUSES] };
+		return {
+			priceMap: {},
+			hideExtStatuses: [...DEFAULT_HIDE_EXT_STATUSES],
+			layout: DEFAULT_LAYOUT,
+			rightWidth: DEFAULT_RIGHT_WIDTH,
+		};
 	}
 }
 
@@ -335,10 +373,14 @@ const QUOTA_SOURCES: QuotaSource[] = [
 export default function (pi: ExtensionAPI) {
 	// 用户开关：/statusbar 切换；新会话按此恢复
 	let userWants = true;
+	// 当前布局模式：session_start 重读配置时重置，/statusbar-layout 运行时切换
+	let layoutMode: LayoutMode = config.layout;
 	// 当前会话的扩展上下文，setFooter 的 render 闭包通过它读取会话数据
 	let currentCtx: ExtensionContext | null = null;
 	// 当前 footer 绑定的 TUI，异步数据到位后请求重绘
 	let activeTui: TUI | null = null;
+	// footer factory 提供的数据源与主题，右侧面板复用（仅 setFooter factory 可拿到 footerData）
+	let activeFooterData: ReadonlyFooterDataProvider | null = null;
 	// 用量缓存：仅在分支条目数、末条目或单价表变化时重算，避免流式输出期间每帧全量遍历
 	let cacheKey = "";
 	let cachedUsage: UsageStats = {
@@ -600,6 +642,259 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.setTitle(name ? `pi · ${name}` : "pi");
 	}
 
+	// ---------- 布局：底部单行 / 右侧悬浮面板 ----------
+
+	/** 右侧面板生命周期：done 即关闭销毁（overlay 不可复用），alive 表示已创建/创建中 */
+	let panelDone: (() => void) | null = null;
+	let panelAlive = false;
+	let panelPending = false;
+
+	/** 当前宽度下是否应由右侧面板接管展示 */
+	function panelActive(width: number): boolean {
+		return (
+			layoutMode === "right" || (layoutMode === "auto" && width >= AUTO_MIN_WIDTH)
+		);
+	}
+
+	/**
+	 * 构建 footer 与右侧面板共用的状态段（逻辑与原单行 footer 一致）。
+	 * variant=footer：用量/花费合为一段，TTFT 带 ⏱ 前缀，ctx 未知时显示 "ctx —"；
+	 * variant=panel：Usage 与 Cost 分行，label 由面板渲染器展示。
+	 */
+	function buildSegments(
+		ctx: ExtensionContext,
+		theme: Theme,
+		footerData: ReadonlyFooterDataProvider,
+		variant: "footer" | "panel",
+	): Segment[] {
+		const segs: Segment[] = [];
+
+		// git 分支；非 git 目录（如多仓工作区根）时回退显示当前目录名
+		const branch = footerData.getGitBranch();
+		if (branch) {
+			segs.push({ label: "Branch", text: theme.fg("accent", branch), pri: 0 });
+		} else {
+			segs.push({
+				label: "Dir",
+				text: theme.fg("muted", basename(ctx.cwd) || ctx.cwd),
+				pri: 0,
+			});
+		}
+
+		// 上下文占用
+		const cu = ctx.getContextUsage();
+		if (cu) {
+			if (cu.percent == null) {
+				// 压缩后或下次响应前 tokens 未知
+				segs.push({
+					label: "Ctx",
+					text: theme.fg("dim", variant === "footer" ? "ctx —" : "—"),
+					pri: 0,
+				});
+			} else {
+				const color =
+					cu.percent >= 90 ? "error" : cu.percent >= 75 ? "warning" : "success";
+				segs.push({
+					label: "Ctx",
+					text: theme.fg(
+						color,
+						`${contextBar(cu.percent)} ${Math.round(cu.percent)}%`,
+					),
+					pri: 0,
+				});
+			}
+		}
+
+		// 当前模型 + 思考强度（off 时不显示强度）
+		if (ctx.model?.id) {
+			const level = pi.getThinkingLevel();
+			const label =
+				level && level !== "off" ? `${ctx.model.id}·${level}` : ctx.model.id;
+			segs.push({ label: "Model", text: theme.fg("muted", label), pri: 1 });
+		}
+
+		// token 用量、缓存命中率与花费
+		const u = computeUsage(ctx);
+		const usageParts = [`↑${fmtTokens(u.input)}`, `↓${fmtTokens(u.output)}`];
+		if (u.cacheRead > 0) {
+			// 命中率 = 缓存读 / 总输入（未缓存输入 + 缓存读 + 缓存写）
+			const totalIn = u.input + u.cacheRead + u.cacheWrite;
+			const rate = totalIn > 0 ? Math.round((u.cacheRead / totalIn) * 100) : 0;
+			usageParts.push(`⚡${fmtTokens(u.cacheRead)}·${rate}%`);
+		}
+		const costText = fmtCost(u.cost);
+		if (variant === "panel") {
+			segs.push({
+				label: "Usage",
+				text: theme.fg("muted", usageParts.join(" ")),
+				pri: 2,
+			});
+			segs.push({ label: "Cost", text: theme.fg("muted", costText), pri: 2 });
+		} else {
+			segs.push({
+				label: "Usage",
+				text: theme.fg("muted", [...usageParts, costText].join(" ")),
+				pri: 2,
+			});
+		}
+
+		// 首 token 耗时（最近一次请求，未完成时不显示）
+		if (lastTtftMs != null)
+			segs.push({
+				label: "TTFT",
+				text: theme.fg(
+					"muted",
+					variant === "footer" ? `⏱${fmtMs(lastTtftMs)}` : fmtMs(lastTtftMs),
+				),
+				pri: 2,
+			});
+
+		// 输出吞吐：生成中显示按字符估算的实时值（~ 前缀），否则显示最近一次响应的精确值
+		const liveSecs = firstTokTs ? (Date.now() - firstTokTs) / 1000 : 0;
+		if (
+			firstTokTs &&
+			liveTokens > 0 &&
+			liveSecs >= 0.3 &&
+			Date.now() - liveTs < 5000
+		) {
+			segs.push({
+				label: "Speed",
+				text: theme.fg("muted", `~${fmtTps(liveTokens / liveSecs)} tok/s`),
+				pri: 2,
+			});
+		} else if (lastTps != null) {
+			segs.push({
+				label: "Speed",
+				text: theme.fg("muted", `${fmtTps(lastTps)} tok/s`),
+				pri: 2,
+			});
+		}
+
+		// 订阅额度：只显示当前模型所属 provider 的源，切模型即切换；无缓存或过期则异步刷新
+		const curProvider = ctx.model?.provider;
+		const active =
+			curProvider == null
+				? undefined
+				: bindings.find((b) => b.providerId === curProvider);
+		if (active) {
+			const state = quotaStates.get(active.source.id);
+			if (!state || Date.now() - state.fetchedAt >= active.source.ttlMs)
+				void refreshQuota(active, ctx, false);
+			if (state?.seg) {
+				const p = state.seg.maxPercent;
+				const color =
+					p == null ? "muted" : p >= 85 ? "error" : p >= 60 ? "warning" : "success";
+				segs.push({
+					label: "Quota",
+					text: theme.fg(color, state.seg.text),
+					pri: 2,
+				});
+			}
+		}
+
+		// 保留其他扩展通过 setStatus 输出的状态，命中隐藏规则的除外
+		for (const s of footerData.getExtensionStatuses().values()) {
+			if (!s) continue;
+			if (config.hideExtStatuses.some((h) => s.includes(h))) continue;
+			segs.push({ label: "", text: s, pri: 3 });
+		}
+		return segs;
+	}
+
+	/** 右侧悬浮信息面板：非捕获浮层，纯展示，竖排 label/value 行 + 边框 */
+	const PANEL_LABEL_W = 7;
+	class StatusPanel implements Component {
+		constructor(private theme: Theme) {}
+		invalidate(): void {}
+		render(width: number): string[] {
+			const ctx = currentCtx;
+			const fd = activeFooterData;
+			if (!ctx || !fd) return [];
+			const th = this.theme;
+			const innerW = Math.max(PANEL_LABEL_W + 4, width - 2);
+			const border = (l: string, r: string) =>
+				th.fg("dim", l + "─".repeat(innerW) + r);
+			const lines: string[] = [border("┌", "┐")];
+			const row = (content: string) => {
+				const padded =
+					content + " ".repeat(Math.max(0, innerW - visibleWidth(content)));
+				return th.fg("dim", "│") + padded + th.fg("dim", "│");
+			};
+			for (const s of buildSegments(ctx, th, fd, "panel")) {
+				if (s.label) {
+					const valueW = Math.max(1, innerW - 2 - PANEL_LABEL_W - 1);
+					lines.push(
+						row(
+							" " +
+								th.fg("dim", s.label.padEnd(PANEL_LABEL_W)) +
+								" " +
+								truncateToWidth(s.text, valueW),
+						),
+					);
+				} else {
+					lines.push(row(" " + truncateToWidth(s.text, innerW - 2)));
+				}
+			}
+			lines.push(border("└", "┘"));
+			return lines;
+		}
+	}
+
+	/** 创建右侧面板 overlay（微任务延迟，避免在 render 周期内同步变更 overlay 栈） */
+	function ensurePanel(ctx: ExtensionContext): void {
+		if (panelAlive || panelPending || !ctx.hasUI || !activeFooterData) return;
+		panelPending = true;
+		queueMicrotask(() => {
+			panelPending = false;
+			if (panelAlive || !userWants) return;
+			panelAlive = true;
+			const reset = () => {
+				panelAlive = false;
+				panelDone = null;
+			};
+			try {
+				void ctx.ui
+					.custom<void>(
+						(tui, theme, _kb, done) => {
+							panelDone = done;
+							if (!activeTui) activeTui = tui;
+							return new StatusPanel(theme);
+						},
+						{
+							overlay: true,
+							// 函数形式：每次渲染重读配置/布局，resize 时自动重判可见性
+							overlayOptions: () => ({
+								anchor: "right-center",
+								width: config.rightWidth,
+								maxHeight: "80%",
+								margin: { right: 1 },
+								nonCapturing: true,
+								visible: (w: number) => userWants && panelAlive && panelActive(w),
+							}),
+						},
+					)
+					.then(reset)
+					.catch(reset);
+			} catch {
+				// custom() 同步抛错（如 UI 已销毁）时复位，下一帧 footer 兜底继续渲染
+				reset();
+			}
+		});
+	}
+
+	/** 关闭并销毁面板（overlay 销毁后不可复用，再次启用时由 ensurePanel 重建） */
+	function closePanel(): void {
+		const done = panelDone;
+		panelDone = null;
+		panelAlive = false;
+		panelPending = false;
+		try {
+			done?.();
+		} catch {
+			// 已关闭时重复调用 done 可能报错，忽略
+		}
+	}
+
 	// ---------- footer ----------
 
 	function enable(ctx: ExtensionContext): void {
@@ -611,6 +906,7 @@ export default function (pi: ExtensionAPI) {
 
 		ctx.ui.setFooter((tui, theme, footerData) => {
 			activeTui = tui;
+			activeFooterData = footerData;
 			// 分支切换（含 worktree 切换）时请求重绘
 			const unsub = footerData.onBranchChange(() => tui.requestRender());
 
@@ -620,114 +916,13 @@ export default function (pi: ExtensionAPI) {
 				render(width: number): string[] {
 					const ctx = currentCtx;
 					if (!ctx) return [];
+					// 宽终端（或强制 right）时由右侧面板接管，底部让位；面板未就绪时仍渲染底部兜底
+					if (panelActive(width)) {
+						ensurePanel(ctx);
+						if (panelAlive || panelPending) return [];
+					}
 					const sep = theme.fg("dim", " │ ");
-					const segs: Segment[] = [];
-
-					// 会话名不进 footer，由 updateTitle() 显示在终端标题
-
-					// git 分支；非 git 目录（如多仓工作区根）时回退显示当前目录名
-					const branch = footerData.getGitBranch();
-					if (branch) {
-						segs.push({ text: theme.fg("accent", branch), pri: 0 });
-					} else {
-						segs.push({
-							text: theme.fg("muted", basename(ctx.cwd) || ctx.cwd),
-							pri: 0,
-						});
-					}
-
-					// 上下文占用
-					const cu = ctx.getContextUsage();
-					if (cu) {
-						if (cu.percent == null) {
-							// 压缩后或下次响应前 tokens 未知
-							segs.push({ text: theme.fg("dim", "ctx —"), pri: 0 });
-						} else {
-							const color =
-								cu.percent >= 90 ? "error" : cu.percent >= 75 ? "warning" : "success";
-							segs.push({
-								text: theme.fg(
-									color,
-									`${contextBar(cu.percent)} ${Math.round(cu.percent)}%`,
-								),
-								pri: 0,
-							});
-						}
-					}
-
-					// 当前模型 + 思考强度（off 时不显示强度）
-					if (ctx.model?.id) {
-						const level = pi.getThinkingLevel();
-						const label =
-							level && level !== "off" ? `${ctx.model.id}·${level}` : ctx.model.id;
-						segs.push({ text: theme.fg("muted", label), pri: 1 });
-					}
-
-					// token 用量、缓存命中率与花费
-					const u = computeUsage(ctx);
-					const parts = [`↑${fmtTokens(u.input)}`, `↓${fmtTokens(u.output)}`];
-					if (u.cacheRead > 0) {
-						// 命中率 = 缓存读 / 总输入（未缓存输入 + 缓存读 + 缓存写）
-						const totalIn = u.input + u.cacheRead + u.cacheWrite;
-						const rate = totalIn > 0 ? Math.round((u.cacheRead / totalIn) * 100) : 0;
-						parts.push(`⚡${fmtTokens(u.cacheRead)}·${rate}%`);
-					}
-					parts.push(fmtCost(u.cost));
-					segs.push({ text: theme.fg("muted", parts.join(" ")), pri: 2 });
-
-					// 首 token 耗时（最近一次请求，未完成时不显示）
-					if (lastTtftMs != null)
-						segs.push({ text: theme.fg("muted", `⏱${fmtMs(lastTtftMs)}`), pri: 2 });
-
-					// 输出吞吐：生成中显示按字符估算的实时值（~ 前缀），否则显示最近一次响应的精确值
-					const liveSecs = firstTokTs ? (Date.now() - firstTokTs) / 1000 : 0;
-					if (
-						firstTokTs &&
-						liveTokens > 0 &&
-						liveSecs >= 0.3 &&
-						Date.now() - liveTs < 5000
-					) {
-						segs.push({
-							text: theme.fg("muted", `~${fmtTps(liveTokens / liveSecs)} tok/s`),
-							pri: 2,
-						});
-					} else if (lastTps != null) {
-						segs.push({
-							text: theme.fg("muted", `${fmtTps(lastTps)} tok/s`),
-							pri: 2,
-						});
-					}
-
-					// 订阅额度：只显示当前模型所属 provider 的源，切模型即切换；无缓存或过期则异步刷新
-					const curProvider = ctx.model?.provider;
-					const active =
-						curProvider == null
-							? undefined
-							: bindings.find((b) => b.providerId === curProvider);
-					if (active) {
-						const state = quotaStates.get(active.source.id);
-						if (!state || Date.now() - state.fetchedAt >= active.source.ttlMs)
-							void refreshQuota(active, ctx, false);
-						if (state?.seg) {
-							const p = state.seg.maxPercent;
-							const color =
-								p == null
-									? "muted"
-									: p >= 85
-										? "error"
-										: p >= 60
-											? "warning"
-											: "success";
-							segs.push({ text: theme.fg(color, state.seg.text), pri: 2 });
-						}
-					}
-
-					// 保留其他扩展通过 setStatus 输出的状态，命中隐藏规则的除外
-					for (const s of footerData.getExtensionStatuses().values()) {
-						if (!s) continue;
-						if (config.hideExtStatuses.some((h) => s.includes(h))) continue;
-						segs.push({ text: s, pri: 3 });
-					}
+					const segs = buildSegments(ctx, theme, footerData, "footer");
 
 					// 超宽时按 pri 从大到小逐段丢弃
 					const join = (list: Segment[]) =>
@@ -749,6 +944,7 @@ export default function (pi: ExtensionAPI) {
 
 	function disable(ctx: ExtensionContext): void {
 		userWants = false;
+		closePanel();
 		if (!ctx.hasUI) return;
 		ctx.ui.setFooter(undefined);
 	}
@@ -765,6 +961,36 @@ export default function (pi: ExtensionAPI) {
 				enable(ctx);
 				ctx.ui.notify("已启用自定义状态栏", "info");
 			}
+		},
+	});
+
+	pi.registerCommand("statusbar-layout", {
+		description: "切换状态栏布局：right / bottom / auto（不带参数循环切换）",
+		handler: async (args, ctx) => {
+			const a = args.trim().toLowerCase();
+			if (a) {
+				if (a !== "right" && a !== "bottom" && a !== "auto") {
+					ctx.ui.notify(`无效布局: ${a}（可选 right / bottom / auto）`, "warning");
+					return;
+				}
+				layoutMode = a;
+			} else {
+				// 循环切换：bottom → right → auto → bottom
+				const NEXT: Record<LayoutMode, LayoutMode> = {
+					bottom: "right",
+					right: "auto",
+					auto: "bottom",
+				};
+				layoutMode = NEXT[layoutMode];
+			}
+			// 切到 bottom 时面板由 visible 回调自动隐藏；切到 right/auto 时若面板未创建由 footer 下一帧触发
+			if (userWants) activeTui?.requestRender();
+			ctx.ui.notify(
+				layoutMode === "auto"
+					? `状态栏布局: auto（终端 ≥${AUTO_MIN_WIDTH} 列时右侧面板，否则底部单行）`
+					: `状态栏布局: ${layoutMode}`,
+				"info",
+			);
 		},
 	});
 
@@ -802,6 +1028,7 @@ export default function (pi: ExtensionAPI) {
 	// 新会话/续接时按用户偏好恢复，并后台刷新一次实时单价
 	pi.on("session_start", async (_event, ctx) => {
 		config = loadConfig(); // 新会话重读配置，改配置文件无需重启
+		layoutMode = config.layout;
 		if (userWants) enable(ctx);
 		updateTitle(ctx);
 		void refreshPrices(ctx, false);

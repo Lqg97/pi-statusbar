@@ -1,6 +1,6 @@
 # pi-statusbar
 
-[pi](https://github.com/badlogic/pi-mono) 自定义状态栏（footer）扩展：单行展示 git 分支、token 用量、实时花费、首 token 耗时、输出吞吐、上下文占用与订阅额度。
+[pi](https://github.com/badlogic/pi-mono) 自定义状态栏扩展：展示 git 分支、token 用量、实时花费、首 token 耗时、输出吞吐、上下文占用与订阅额度。支持两种布局：**底部单行 footer** 与类 opencode 的**右侧悬浮信息面板**，可固定其一或按终端宽度自动切换（auto，默认）。
 
 ```text
 main │ ↑12.3k ↓45.6k ⚡100k·85% $0.123 ⏱980ms 128 tok/s │ ▰▰▰▱▱▱▱▱▱▱ 23% │ GLM 5h 12%·周 34% │ glm-5.3·high │ LSP Active
@@ -19,6 +19,7 @@ main │ ↑12.3k ↓45.6k ⚡100k·85% $0.123 ⏱980ms 128 tok/s │ ▰▰▰�
   - `/quota` 强制刷新并显示详情
 - **终端标题**：会话名写入终端标题（`pi · 会话名`），不占 footer 宽度
 - **窄终端自适应**：按 扩展状态 → 额度/token → 模型 的顺序逐段收起，始终保留分支与上下文
+- **布局可选（layout）**：`bottom` 底部单行 / `right` 右侧悬浮竖卡面板 / `auto`（默认）按终端宽度自动选择（≥120 列用右侧面板），拖拽 resize 实时切换；`/statusbar-layout` 运行时切换
 - `/statusbar` 随时切换回内置 footer，新会话默认恢复自定义样式
 
 ## 安装
@@ -47,9 +48,15 @@ pi -e git:github.com/Lqg97/pi-statusbar
   "deepseek-v4.1-flash": ["deepseek", "deepseek-v4-flash"]
  },
  // 按文本包含隐藏其他扩展的 footer 状态（默认 ["LSP Inactive"]）
- "hideExtStatuses": ["LSP Inactive"]
+ "hideExtStatuses": ["LSP Inactive"],
+ // 布局："bottom" 底部单行 / "right" 右侧面板 / "auto" 按宽度自动（默认）
+ "layout": "auto",
+ // 右侧面板宽度（列），默认 28，范围 [20, 60]
+ "rightWidth": 28
 }
 ```
+
+**布局说明**：`auto` 模式下终端 ≥120 列时状态收进右侧悬浮竖卡（Branch / Ctx / Model / Usage / Cost / TTFT / Speed / Quota 每行一项，带边框），底部 footer 让位；<120 列时回到单行 footer。右侧面板是**非捕获浮层**：不抢键盘焦点，但会遮住聊天内容右缘（pi 扩展 API 不支持真正的布局分栏）。
 
 **单价自动匹配规则**（未配置 priceMap 时，按顺序取第一个命中）：
 
@@ -65,6 +72,7 @@ pi -e git:github.com/Lqg97/pi-statusbar
 | 命令 | 说明 |
 | --- | --- |
 | `/statusbar` | 切换自定义状态栏 / 内置 footer |
+| `/statusbar-layout [right\|bottom\|auto]` | 切换布局，不带参数时循环切换，即时生效（不写回配置文件） |
 | `/quota` | 强制刷新订阅额度并显示详情 |
 | `/prices` | 强制刷新实时单价并显示当前模型单价来源 |
 
