@@ -7,13 +7,14 @@
  * 会话名不占 footer 宽度，只写入终端标题（会话名 · 目录名 · 模型）
  *
  * - 花费按实时单价计算：session 启动时从 models.dev/api.json 拉取各家官方单价（本地缓存 24h），
- *   失败时回落 models.json 的 cost 字段；/prices 强制刷新并显示当前模型单价来源
+ *   失败时回落 models.json 的 cost 字段；/statusbar prices 强制刷新并显示当前模型单价来源
  * - 上下文占用 ≥75% 变黄，≥90% 变红
  * - 订阅额度自动发现（按 provider baseUrl 匹配，只显示当前模型所属 provider 的额度）：
  *     GLM Coding Plan（bigmodel.cn / z.ai）      → 5h/周 token 窗口百分比
  *     DeepSeek 余额（deepseek.com）              → 按量账户余额
  *     OpenRouter 额度（openrouter.ai）           → 剩余 credits
- *   带 TTL 缓存，失败静默；/quota 强制刷新并显示详情
+ *   带 TTL 缓存，失败静默；/statusbar quota 强制刷新并显示详情
+ * - /exit 为 /quit 的别名，优雅退出 pi
  * - 窄终端先按 扩展状态 → 额度/token → 模型 的顺序收起，仍放不下则整段换行成多行（分支与上下文永不丢弃）
  * - 布局可配置（layout）：bottom 底部单行 / right 右侧悬浮竖卡面板 / auto（默认）
  *   auto 按终端宽度自动选择：≥120 列用右侧面板，否则底部单行，resize 实时切换；
@@ -1475,9 +1476,25 @@ export default function (pi: ExtensionAPI) {
 		return true;
 	}
 
+	/** 强制刷新订阅额度并显示详情（/statusbar quota 子命令） */
+	async function refreshQuotaNow(ctx: ExtensionContext): Promise<void> {
+		if (bindings.length === 0) {
+			ctx.ui.notify("未发现可查询额度的订阅 provider", "warning");
+			return;
+		}
+		await Promise.all(bindings.map((b) => refreshQuota(b, ctx, true)));
+		const line = bindings
+			.map(
+				(b) => `${b.source.id}: ${quotaStates.get(b.source.id)?.detail ?? "—"}`,
+			)
+			.join("；")
+			.replace(/\n/g, " ");
+		ctx.ui.notify(line, "info");
+	}
+
 	pi.registerCommand("statusbar", {
 		description:
-			"状态栏设置：无参数打开交互菜单；子命令 on/off | layout [right|bottom|auto] | metrics",
+			"状态栏设置：无参数打开交互菜单；子命令 on/off | layout [right|bottom|auto] | metrics | quota | prices",
 		handler: async (args, ctx) => {
 			const parts = args.trim().toLowerCase().split(/\s+/).filter(Boolean);
 			const sub = parts[0];
@@ -1508,9 +1525,17 @@ export default function (pi: ExtensionAPI) {
 				await runMetricsPicker(ctx);
 				return;
 			}
+			if (sub === "quota") {
+				await refreshQuotaNow(ctx);
+				return;
+			}
+			if (sub === "prices") {
+				await refreshPricesNow(ctx);
+				return;
+			}
 			if (sub) {
 				ctx.ui.notify(
-					`未知子命令: ${sub}。用法: /statusbar [on|off|layout [right|bottom|auto]|metrics]，或无参数打开交互菜单`,
+					`未知子命令: ${sub}。用法: /statusbar [on|off|layout [right|bottom|auto]|metrics|quota|prices]，或无参数打开交互菜单`,
 					"warning",
 				);
 				return;
@@ -1536,34 +1561,21 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerCommand("quota", {
-		description: "强制刷新订阅额度并显示详情",
-		handler: async (_args, ctx) => {
-			if (bindings.length === 0) {
-				ctx.ui.notify("未发现可查询额度的订阅 provider", "warning");
-				return;
-			}
-			await Promise.all(bindings.map((b) => refreshQuota(b, ctx, true)));
-			const line = bindings
-				.map(
-					(b) => `${b.source.id}: ${quotaStates.get(b.source.id)?.detail ?? "—"}`,
-				)
-				.join("；")
-				.replace(/\n/g, " ");
-			ctx.ui.notify(line, "info");
-		},
-	});
+	/** 刷新 models.dev 实时单价并显示当前模型单价来源（/statusbar prices 子命令） */
+	async function refreshPricesNow(ctx: ExtensionContext): Promise<void> {
+		await refreshPrices(ctx, true);
+		const model = ctx.model;
+		const r = ratesFor(ctx);
+		const line = r
+			? `${model?.id ?? "?"}: $${r.input}/$${r.output} 每百万（缓存读 $${r.cacheRead ?? 0}）来源 ${priceSource}`
+			: `${model?.id ?? "?"}: 无可用单价（来源 ${priceSource}）`;
+		ctx.ui.notify(line, "info");
+	}
 
-	pi.registerCommand("prices", {
-		description: "刷新 models.dev 实时单价并显示当前模型单价来源",
+	pi.registerCommand("exit", {
+		description: "退出 pi（/quit 的别名）",
 		handler: async (_args, ctx) => {
-			await refreshPrices(ctx, true);
-			const model = ctx.model;
-			const r = ratesFor(ctx);
-			const line = r
-				? `${model?.id ?? "?"}: $${r.input}/$${r.output} 每百万（缓存读 $${r.cacheRead ?? 0}）来源 ${priceSource}`
-				: `${model?.id ?? "?"}: 无可用单价（来源 ${priceSource}）`;
-			ctx.ui.notify(line, "info");
+			ctx.shutdown();
 		},
 	});
 

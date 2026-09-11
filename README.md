@@ -9,14 +9,14 @@ main │ ↑12.3k ↓45.6k ⚡100k·85% $0.123 ⏱980ms 128 tok/s │ ▰▰▰�
 ## 功能
 
 - **替换内置 footer**：`git 分支 │ ↑输入 ↓输出 ⚡缓存·命中率 $花费 ⏱首token 输出tok/s │ 上下文% │ 订阅额度 │ 模型 │ 其他扩展状态`
-- **实时单价**：从 [models.dev](https://models.dev) 拉取官方单价计算花费（本地缓存 24h），失败回落 models.json 的 cost 字段；`/prices` 强制刷新并显示单价来源
+- **实时单价**：从 [models.dev](https://models.dev) 拉取官方单价计算花费（本地缓存 24h），失败回落 models.json 的 cost 字段；`/statusbar prices` 强制刷新并显示单价来源
 - **上下文告警**：占用 ≥75% 变黄，≥90% 变红
 - **订阅额度自动发现**：按 provider baseUrl 匹配，只显示当前模型所属 provider 的额度：
   - GLM Coding Plan（bigmodel.cn / z.ai）→ 5h/周 token 窗口百分比
   - Kimi（api.kimi.com）→ 周配额与短窗口用量
   - DeepSeek（deepseek.com）→ 按量账户余额
   - OpenRouter（openrouter.ai）→ 剩余 credits
-  - `/quota` 强制刷新并显示详情
+  - `/statusbar quota` 强制刷新并显示详情
 - **终端标题**：会话名写入终端标题（`pi · 会话名`），不占 footer 宽度
 - **窄终端自适应**：按 扩展状态 → 额度/token → 模型 的顺序逐段收起，仍放不下时整段换行成多行（分支与上下文永不丢弃）
 - **布局可选（layout）**：`bottom` 底部单行 / `right` 右侧悬浮竖卡面板（Model 与 Effort 分行显示，超长自动换行不截断）/ `auto`（默认）按终端宽度自动选择（≥120 列用右侧面板），拖拽 resize 实时切换
@@ -82,8 +82,9 @@ pi -e git:github.com/Lqg97/pi-statusbar
 | `/statusbar on\|off` | 启用 / 停用自定义状态栏（停用后恢复内置 footer） |
 | `/statusbar layout [right\|bottom\|auto]` | 切换布局，不带参数时循环切换，即时生效（不写回配置文件） |
 | `/statusbar metrics` | 直接进入指标显隐交互式配置 |
-| `/quota` | 强制刷新订阅额度并显示详情 |
-| `/prices` | 强制刷新实时单价并显示当前模型单价来源 |
+| `/statusbar quota` | 强制刷新订阅额度并显示详情 |
+| `/statusbar prices` | 强制刷新实时单价并显示当前模型单价来源 |
+| `/exit` | 退出 pi（`/quit` 的别名） |
 
 ## 兼容性
 
