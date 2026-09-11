@@ -19,15 +19,16 @@
  *   auto 按终端宽度自动选择：≥120 列用右侧面板，否则底部单行，resize 实时切换；
  *   右侧面板为非捕获浮层（不抢键盘焦点），宽度由 rightWidth 配置（默认 32 列）；
  *   注意：面板浮在聊天内容之上，会遮住右缘内容（pi 扩展 API 不支持真布局分栏）；
- *   /statusbar-layout [right|bottom|auto] 运行时切换，不带参数循环
- * - /statusbar 切换回内置 footer，新会话默认恢复自定义样式
+ *   /statusbar 无参数打开交互式菜单（布局 / 指标显隐 / 启停），或子命令快捷方式：
+ *   /statusbar [on|off] | layout [right|bottom|auto] | metrics
+ * - 新会话默认恢复自定义样式
  * - 用户配置 ~/.pi/agent/statusbar.json（环境变量 PI_STATUSBAR_CONFIG 可覆盖路径）：
  *     priceMap         本地模型 → models.dev 单价映射，key 为 "provider:model" 或裸 "model"
  *     hideExtStatuses  按文本包含隐藏的其他扩展状态（默认 ["LSP Inactive"]）
  *     layout           "bottom" | "right" | "auto"（默认 "auto"）
  *     rightWidth       右侧面板宽度，默认 32，范围 [20, 60]
  *     hiddenMetrics    隐藏的指标 key 数组，可选：branch/ctx/model/effort/usage/ttft/speed/quota/ext；
- *                      也可用 /statusbar-metrics 交互式配置（会写回此字段）
+ *                      也可用 /statusbar metrics 交互式配置（会写回此字段）
  *   未配置 priceMap 时按模型 id 在 models.dev 全量中自动匹配（同名取最便宜），零配置可用；
  *   配置在新会话时重读，改完开新会话即生效
  */
@@ -100,7 +101,7 @@ interface StatusbarConfig {
 	layout: LayoutMode;
 	/** 右侧面板宽度（列），默认 32，读取时 clamp 到 [20, 60] */
 	rightWidth: number;
-	/** 隐藏的指标 key 列表（默认全部显示），/statusbar-metrics 交互式配置 */
+	/** 隐藏的指标 key 列表（默认全部显示），/statusbar metrics 交互式配置 */
 	hiddenMetrics: MetricKey[];
 }
 
@@ -447,7 +448,7 @@ const QUOTA_SOURCES: QuotaSource[] = [
 export default function (pi: ExtensionAPI) {
 	// 用户开关：/statusbar 切换；新会话按此恢复
 	let userWants = true;
-	// 当前布局模式：session_start 重读配置时重置，/statusbar-layout 运行时切换
+	// 当前布局模式：session_start 重读配置时重置，/statusbar layout 运行时切换
 	let layoutMode: LayoutMode = config.layout;
 	// 当前会话的扩展上下文，setFooter 的 render 闭包通过它读取会话数据
 	let currentCtx: ExtensionContext | null = null;
@@ -903,7 +904,7 @@ export default function (pi: ExtensionAPI) {
 			if (config.hideExtStatuses.some((h) => s.includes(h))) continue;
 			segs.push({ label: "", text: s, pri: 3, key: "ext" });
 		}
-		// 应用指标显隐配置（/statusbar-metrics）
+		// 应用指标显隐配置（/statusbar metrics）
 		return segs.filter(
 			(s) => !s.key || !config.hiddenMetrics.includes(s.key),
 		);
@@ -1077,97 +1078,161 @@ export default function (pi: ExtensionAPI) {
 
 	// ---------- 命令与事件 ----------
 
-	pi.registerCommand("statusbar", {
-		description: "切换自定义状态栏 / 内置 footer",
-		handler: async (_args, ctx) => {
-			if (userWants) {
-				disable(ctx);
-				ctx.ui.notify("已恢复内置 footer", "info");
-			} else {
-				enable(ctx);
-				ctx.ui.notify("已启用自定义状态栏", "info");
-			}
-		},
-	});
+	/** 应用布局模式并提示（不写回配置文件；省略 mode 时循环切换 bottom→right→auto） */
+	function applyLayout(ctx: ExtensionContext, mode?: LayoutMode): void {
+		if (mode) {
+			layoutMode = mode;
+		} else {
+			const NEXT: Record<LayoutMode, LayoutMode> = {
+				bottom: "right",
+				right: "auto",
+				auto: "bottom",
+			};
+			layoutMode = NEXT[layoutMode];
+		}
+		// 切到 bottom 时面板由 visible 回调自动隐藏；切到 right/auto 时若面板未创建由 footer 下一帧触发
+		if (userWants) activeTui?.requestRender();
+		ctx.ui.notify(
+			layoutMode === "auto"
+				? `状态栏布局: auto（终端 ≥${AUTO_MIN_WIDTH} 列时右侧面板，否则底部单行）`
+				: `状态栏布局: ${layoutMode}`,
+			"info",
+		);
+	}
 
-	pi.registerCommand("statusbar-layout", {
-		description: "切换状态栏布局：right / bottom / auto（不带参数循环切换）",
-		handler: async (args, ctx) => {
-			const a = args.trim().toLowerCase();
-			if (a) {
-				if (a !== "right" && a !== "bottom" && a !== "auto") {
-					ctx.ui.notify(`无效布局: ${a}（可选 right / bottom / auto）`, "warning");
-					return;
-				}
-				layoutMode = a;
-			} else {
-				// 循环切换：bottom → right → auto → bottom
-				const NEXT: Record<LayoutMode, LayoutMode> = {
-					bottom: "right",
-					right: "auto",
-					auto: "bottom",
-				};
-				layoutMode = NEXT[layoutMode];
-			}
-			// 切到 bottom 时面板由 visible 回调自动隐藏；切到 right/auto 时若面板未创建由 footer 下一帧触发
-			if (userWants) activeTui?.requestRender();
+	/** 切换自定义状态栏 / 内置 footer */
+	function toggleStatusbar(ctx: ExtensionContext): void {
+		if (userWants) {
+			disable(ctx);
+			ctx.ui.notify("已恢复内置 footer", "info");
+		} else {
+			enable(ctx);
+			ctx.ui.notify("已启用自定义状态栏", "info");
+		}
+	}
+
+	/** 交互式指标显隐选择器；保存返回 true，取消返回 false */
+	async function runMetricsPicker(ctx: ExtensionContext): Promise<boolean> {
+		if (!ctx.hasUI) {
 			ctx.ui.notify(
-				layoutMode === "auto"
-					? `状态栏布局: auto（终端 ≥${AUTO_MIN_WIDTH} 列时右侧面板，否则底部单行）`
-					: `状态栏布局: ${layoutMode}`,
+				"当前模式不支持交互式配置，请直接改配置文件的 hiddenMetrics",
+				"warning",
+			);
+			return false;
+		}
+		const orig = config.hiddenMetrics;
+		const hidden = new Set<MetricKey>(orig);
+		const DONE = "✔ 完成（保存到配置文件）";
+		for (;;) {
+			const options = [
+				...METRICS.map((m) => `${hidden.has(m.key) ? "☐" : "☑"} ${m.name}`),
+				DONE,
+			];
+			const choice = await ctx.ui.select(
+				"状态栏指标配置（选择切换 ☑显示/☐隐藏，Esc 取消不保存）",
+				options,
+			);
+			if (choice == null) {
+				// 取消：回退未保存的预览改动
+				config.hiddenMetrics = orig;
+				if (userWants) activeTui?.requestRender();
+				ctx.ui.notify("已取消，配置未保存", "info");
+				return false;
+			}
+			if (choice === DONE) break;
+			const m = METRICS.find((_, i) => options[i] === choice);
+			if (!m) continue;
+			if (hidden.has(m.key)) hidden.delete(m.key);
+			else hidden.add(m.key);
+			// 即时预览（未保存，Esc 可回退）
+			config.hiddenMetrics = [...hidden];
+			if (userWants) activeTui?.requestRender();
+		}
+		const keys = METRICS.filter((m) => hidden.has(m.key)).map((m) => m.key);
+		try {
+			saveHiddenMetrics(keys);
+			ctx.ui.notify(
+				keys.length === 0
+					? "已保存：显示全部指标"
+					: `已保存：隐藏 ${keys.join("、")}（注意：配置文件中的注释会被去除）`,
 				"info",
 			);
-		},
-	});
+		} catch (e) {
+			ctx.ui.notify(`写入配置文件失败: ${e}`, "error");
+			return false;
+		}
+		if (userWants) activeTui?.requestRender();
+		return true;
+	}
 
-	pi.registerCommand("statusbar-metrics", {
-		description: "交互式配置状态栏指标显隐（选择切换 ☑/☐，✔ 完成保存）",
-		handler: async (_args, ctx) => {
-			if (!ctx.hasUI) {
-				ctx.ui.notify("当前模式不支持交互式配置，请直接改配置文件的 hiddenMetrics", "warning");
+	pi.registerCommand("statusbar", {
+		description:
+			"状态栏设置：无参数打开交互菜单；子命令 on/off | layout [right|bottom|auto] | metrics",
+		handler: async (args, ctx) => {
+			const parts = args.trim().toLowerCase().split(/\s+/).filter(Boolean);
+			const sub = parts[0];
+
+			// 子命令快捷方式（脚本/RPC 友好，跳过交互菜单）
+			if (sub === "on" || sub === "off") {
+				if ((sub === "on") !== userWants) toggleStatusbar(ctx);
+				else
+					ctx.ui.notify(
+						sub === "on" ? "自定义状态栏已启用" : "已是内置 footer",
+						"info",
+					);
 				return;
 			}
-			const orig = config.hiddenMetrics;
-			const hidden = new Set<MetricKey>(orig);
-			const DONE = "✔ 完成（保存到配置文件）";
-			for (;;) {
-				const options = [
-					...METRICS.map((m) => `${hidden.has(m.key) ? "☐" : "☑"} ${m.name}`),
-					DONE,
-				];
-				const choice = await ctx.ui.select(
-					"状态栏指标配置（选择切换 ☑显示/☐隐藏，Esc 取消不保存）",
-					options,
-				);
-				if (choice == null) {
-					// 取消：回退未保存的预览改动
-					config.hiddenMetrics = orig;
-					if (userWants) activeTui?.requestRender();
-					ctx.ui.notify("已取消，配置未保存", "info");
+			if (sub === "layout") {
+				const a = parts[1];
+				if (a && a !== "right" && a !== "bottom" && a !== "auto") {
+					ctx.ui.notify(
+						`无效布局: ${a}（可选 right / bottom / auto）`,
+						"warning",
+					);
 					return;
 				}
-				if (choice === DONE) break;
-				const m = METRICS.find((_, i) => options[i] === choice);
-				if (!m) continue;
-				if (hidden.has(m.key)) hidden.delete(m.key);
-				else hidden.add(m.key);
-				// 即时预览（未保存，Esc 可回退）
-				config.hiddenMetrics = [...hidden];
-				if (userWants) activeTui?.requestRender();
+				applyLayout(ctx, a as LayoutMode | undefined);
+				return;
 			}
-			const keys = METRICS.filter((m) => hidden.has(m.key)).map((m) => m.key);
-			try {
-				saveHiddenMetrics(keys);
+			if (sub === "metrics") {
+				await runMetricsPicker(ctx);
+				return;
+			}
+			if (sub) {
 				ctx.ui.notify(
-					keys.length === 0
-						? "已保存：显示全部指标"
-						: `已保存：隐藏 ${keys.join("、")}（注意：配置文件中的注释会被去除）`,
-					"info",
+					`未知子命令: ${sub}。用法: /statusbar [on|off|layout [right|bottom|auto]|metrics]，或无参数打开交互菜单`,
+					"warning",
 				);
-			} catch (e) {
-				ctx.ui.notify(`写入配置文件失败: ${e}`, "error");
+				return;
 			}
-			if (userWants) activeTui?.requestRender();
+
+			// 无参数：无 UI 环境保持旧行为（切换开关），否则打开交互式菜单
+			if (!ctx.hasUI) {
+				toggleStatusbar(ctx);
+				return;
+			}
+			for (;;) {
+				const options = [
+					`布局: ${layoutMode}（点击循环 bottom→right→auto）`,
+					"配置指标显隐…",
+					userWants
+						? "停用自定义状态栏（恢复内置 footer）"
+						: "启用自定义状态栏",
+				];
+				const choice = await ctx.ui.select(
+					"状态栏设置（Esc 退出）",
+					options,
+				);
+				if (choice == null) return;
+				if (choice.startsWith("布局:")) {
+					applyLayout(ctx);
+				} else if (choice.startsWith("配置指标显隐")) {
+					await runMetricsPicker(ctx);
+				} else {
+					toggleStatusbar(ctx);
+					return;
+				}
+			}
 		},
 	});
 
