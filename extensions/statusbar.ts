@@ -26,6 +26,8 @@
  *     hideExtStatuses  按文本包含隐藏的其他扩展状态（默认 ["LSP Inactive"]）
  *     layout           "bottom" | "right" | "auto"（默认 "auto"）
  *     rightWidth       右侧面板宽度，默认 32，范围 [20, 60]
+ *     hiddenMetrics    隐藏的指标 key 数组，可选：branch/ctx/model/effort/usage/ttft/speed/quota/ext；
+ *                      也可用 /statusbar-metrics 交互式配置（会写回此字段）
  *   未配置 priceMap 时按模型 id 在 models.dev 全量中自动匹配（同名取最便宜），零配置可用；
  *   配置在新会话时重读，改完开新会话即生效
  */
@@ -56,12 +58,13 @@ interface UsageStats {
 	cost: number;
 }
 
-/** 渲染段：pri 越大，窄终端下越先被丢弃；label 仅在右侧面板竖排展示时使用 */
+/** 渲染段：pri 越大，窄终端下越先被丢弃；label 仅在右侧面板竖排展示时使用；key 用于指标显隐配置 */
 interface Segment {
 	label: string;
 	text: string;
 	pri: number;
 	color?: string;
+	key?: MetricKey;
 }
 
 /** 额度源渲染出的短文本与最大占用百分比（决定颜色） */
@@ -97,6 +100,38 @@ interface StatusbarConfig {
 	layout: LayoutMode;
 	/** 右侧面板宽度（列），默认 32，读取时 clamp 到 [20, 60] */
 	rightWidth: number;
+	/** 隐藏的指标 key 列表（默认全部显示），/statusbar-metrics 交互式配置 */
+	hiddenMetrics: MetricKey[];
+}
+
+/** 可配置显隐的指标 */
+type MetricKey =
+	| "branch"
+	| "ctx"
+	| "model"
+	| "effort"
+	| "usage"
+	| "ttft"
+	| "speed"
+	| "quota"
+	| "ext";
+
+const METRICS: { key: MetricKey; name: string }[] = [
+	{ key: "branch", name: "分支 / 目录" },
+	{ key: "ctx", name: "上下文占用" },
+	{ key: "model", name: "模型名" },
+	{ key: "effort", name: "思考强度 effort（仅右侧面板分行显示）" },
+	{ key: "usage", name: "token 用量 / 缓存 / 花费" },
+	{ key: "ttft", name: "首 token 耗时 TTFT" },
+	{ key: "speed", name: "输出吞吐 tok/s" },
+	{ key: "quota", name: "订阅额度" },
+	{ key: "ext", name: "其他扩展状态" },
+];
+
+function toMetricKeys(v: unknown): MetricKey[] {
+	if (!Array.isArray(v)) return [];
+	const valid = new Set(METRICS.map((m) => m.key as string));
+	return v.filter((k): k is MetricKey => typeof k === "string" && valid.has(k));
 }
 
 const CONFIG_FILE =
@@ -144,6 +179,7 @@ function loadConfig(): StatusbarConfig {
 				: [...DEFAULT_HIDE_EXT_STATUSES],
 			layout: toLayoutMode(raw?.layout),
 			rightWidth: toRightWidth(raw?.rightWidth),
+			hiddenMetrics: toMetricKeys(raw?.hiddenMetrics),
 		};
 	} catch {
 		return {
@@ -151,8 +187,28 @@ function loadConfig(): StatusbarConfig {
 			hideExtStatuses: [...DEFAULT_HIDE_EXT_STATUSES],
 			layout: DEFAULT_LAYOUT,
 			rightWidth: DEFAULT_RIGHT_WIDTH,
+			hiddenMetrics: [],
 		};
 	}
+}
+
+/** 保存 hiddenMetrics 到配置文件（保留其他字段；会去除 jsonc 注释） */
+function saveHiddenMetrics(keys: MetricKey[]): void {
+	let raw: Record<string, unknown> = {};
+	try {
+		raw = JSON.parse(stripJsonComments(readFileSync(CONFIG_FILE, "utf8")));
+	} catch {
+		// 文件缺失或损坏：基于当前生效配置重建
+		raw = {
+			priceMap: config.priceMap,
+			hideExtStatuses: config.hideExtStatuses,
+			layout: config.layout,
+			rightWidth: config.rightWidth,
+		};
+	}
+	raw.hiddenMetrics = keys;
+	writeFileSync(CONFIG_FILE, JSON.stringify(raw, null, "\t") + "\n");
+	config.hiddenMetrics = keys;
 }
 
 let config = loadConfig();
@@ -690,12 +746,13 @@ export default function (pi: ExtensionAPI) {
 		// git 分支；非 git 目录（如多仓工作区根）时回退显示当前目录名
 		const branch = footerData.getGitBranch();
 		if (branch) {
-			segs.push({ label: "Branch", text: theme.fg("accent", branch), pri: 0 });
+			segs.push({ label: "Branch", text: theme.fg("accent", branch), pri: 0, key: "branch" });
 		} else {
 			segs.push({
 				label: "Dir",
 				text: theme.fg("muted", basename(ctx.cwd) || ctx.cwd),
 				pri: 0,
+				key: "branch",
 			});
 		}
 
@@ -708,6 +765,7 @@ export default function (pi: ExtensionAPI) {
 					label: "Ctx",
 					text: theme.fg("dim", variant === "footer" ? "ctx —" : "—"),
 					pri: 0,
+					key: "ctx",
 				});
 			} else {
 				const color =
@@ -719,6 +777,7 @@ export default function (pi: ExtensionAPI) {
 						`${contextBar(cu.percent)} ${Math.round(cu.percent)}%`,
 					),
 					pri: 0,
+					key: "ctx",
 				});
 			}
 		}
@@ -726,25 +785,26 @@ export default function (pi: ExtensionAPI) {
 		// 当前模型 + 思考强度（off 时不显示强度）
 		if (ctx.model?.id) {
 			const level = pi.getThinkingLevel();
+			const showEffort =
+				!!level && level !== "off" && !config.hiddenMetrics.includes("effort");
 			if (variant === "panel") {
 				// 面板竖排：模型与思考强度分行，避免长模型名被截断
 				segs.push({
 					label: "Model",
 					text: theme.fg("muted", ctx.model.id),
 					pri: 1,
+					key: "model",
 				});
-				if (level && level !== "off")
+				if (showEffort)
 					segs.push({
 						label: "Effort",
-						text: theme.fg("muted", level),
+						text: theme.fg("muted", level!),
 						pri: 1,
+						key: "effort",
 					});
 			} else {
-				const label =
-					level && level !== "off"
-						? `${ctx.model.id}·${level}`
-						: ctx.model.id;
-				segs.push({ label: "Model", text: theme.fg("muted", label), pri: 1 });
+				const label = showEffort ? `${ctx.model.id}·${level}` : ctx.model.id;
+				segs.push({ label: "Model", text: theme.fg("muted", label), pri: 1, key: "model" });
 			}
 		}
 
@@ -762,11 +822,11 @@ export default function (pi: ExtensionAPI) {
 		const costText = fmtCost(u.cost);
 		if (variant === "panel") {
 			// 竖排值列较窄，输入/输出/缓存各占一行，避免长值被截断
-			segs.push({ label: "In", text: theme.fg("muted", inText), pri: 2 });
-			segs.push({ label: "Out", text: theme.fg("muted", outText), pri: 2 });
+			segs.push({ label: "In", text: theme.fg("muted", inText), pri: 2, key: "usage" });
+			segs.push({ label: "Out", text: theme.fg("muted", outText), pri: 2, key: "usage" });
 			if (cacheText)
-				segs.push({ label: "Cache", text: theme.fg("muted", cacheText), pri: 2 });
-			segs.push({ label: "Cost", text: theme.fg("muted", costText), pri: 2 });
+				segs.push({ label: "Cache", text: theme.fg("muted", cacheText), pri: 2, key: "usage" });
+			segs.push({ label: "Cost", text: theme.fg("muted", costText), pri: 2, key: "usage" });
 		} else {
 			const parts = [inText, outText];
 			if (cacheText) parts.push(cacheText);
@@ -775,6 +835,7 @@ export default function (pi: ExtensionAPI) {
 				label: "Usage",
 				text: theme.fg("muted", parts.join(" ")),
 				pri: 2,
+				key: "usage",
 			});
 		}
 
@@ -787,6 +848,7 @@ export default function (pi: ExtensionAPI) {
 					variant === "footer" ? `⏱${fmtMs(lastTtftMs)}` : fmtMs(lastTtftMs),
 				),
 				pri: 2,
+				key: "ttft",
 			});
 
 		// 输出吞吐：生成中显示按字符估算的实时值（~ 前缀），否则显示最近一次响应的精确值
@@ -801,12 +863,14 @@ export default function (pi: ExtensionAPI) {
 				label: "Speed",
 				text: theme.fg("muted", `~${fmtTps(liveTokens / liveSecs)} tok/s`),
 				pri: 2,
+				key: "speed",
 			});
 		} else if (lastTps != null) {
 			segs.push({
 				label: "Speed",
 				text: theme.fg("muted", `${fmtTps(lastTps)} tok/s`),
 				pri: 2,
+				key: "speed",
 			});
 		}
 
@@ -828,6 +892,7 @@ export default function (pi: ExtensionAPI) {
 					label: "Quota",
 					text: theme.fg(color, state.seg.text),
 					pri: 2,
+					key: "quota",
 				});
 			}
 		}
@@ -836,9 +901,12 @@ export default function (pi: ExtensionAPI) {
 		for (const s of footerData.getExtensionStatuses().values()) {
 			if (!s) continue;
 			if (config.hideExtStatuses.some((h) => s.includes(h))) continue;
-			segs.push({ label: "", text: s, pri: 3 });
+			segs.push({ label: "", text: s, pri: 3, key: "ext" });
 		}
-		return segs;
+		// 应用指标显隐配置（/statusbar-metrics）
+		return segs.filter(
+			(s) => !s.key || !config.hiddenMetrics.includes(s.key),
+		);
 	}
 
 	/** 右侧悬浮信息面板：非捕获浮层，纯展示，竖排 label/value 行 + 边框 */
@@ -1049,6 +1117,57 @@ export default function (pi: ExtensionAPI) {
 					: `状态栏布局: ${layoutMode}`,
 				"info",
 			);
+		},
+	});
+
+	pi.registerCommand("statusbar-metrics", {
+		description: "交互式配置状态栏指标显隐（选择切换 ☑/☐，✔ 完成保存）",
+		handler: async (_args, ctx) => {
+			if (!ctx.hasUI) {
+				ctx.ui.notify("当前模式不支持交互式配置，请直接改配置文件的 hiddenMetrics", "warning");
+				return;
+			}
+			const orig = config.hiddenMetrics;
+			const hidden = new Set<MetricKey>(orig);
+			const DONE = "✔ 完成（保存到配置文件）";
+			for (;;) {
+				const options = [
+					...METRICS.map((m) => `${hidden.has(m.key) ? "☐" : "☑"} ${m.name}`),
+					DONE,
+				];
+				const choice = await ctx.ui.select(
+					"状态栏指标配置（选择切换 ☑显示/☐隐藏，Esc 取消不保存）",
+					options,
+				);
+				if (choice == null) {
+					// 取消：回退未保存的预览改动
+					config.hiddenMetrics = orig;
+					if (userWants) activeTui?.requestRender();
+					ctx.ui.notify("已取消，配置未保存", "info");
+					return;
+				}
+				if (choice === DONE) break;
+				const m = METRICS.find((_, i) => options[i] === choice);
+				if (!m) continue;
+				if (hidden.has(m.key)) hidden.delete(m.key);
+				else hidden.add(m.key);
+				// 即时预览（未保存，Esc 可回退）
+				config.hiddenMetrics = [...hidden];
+				if (userWants) activeTui?.requestRender();
+			}
+			const keys = METRICS.filter((m) => hidden.has(m.key)).map((m) => m.key);
+			try {
+				saveHiddenMetrics(keys);
+				ctx.ui.notify(
+					keys.length === 0
+						? "已保存：显示全部指标"
+						: `已保存：隐藏 ${keys.join("、")}（注意：配置文件中的注释会被去除）`,
+					"info",
+				);
+			} catch (e) {
+				ctx.ui.notify(`写入配置文件失败: ${e}`, "error");
+			}
+			if (userWants) activeTui?.requestRender();
 		},
 	});
 
