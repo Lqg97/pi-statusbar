@@ -23,8 +23,15 @@
  *   配置在新会话时重读，改完开新会话即生效
  */
 import type { AssistantMessage, ModelCost } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
+import type {
+	ExtensionAPI,
+	ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
+import {
+	truncateToWidth,
+	visibleWidth,
+	type TUI,
+} from "@earendil-works/pi-tui";
 import { readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
@@ -56,7 +63,10 @@ interface QuotaSource {
 	id: string;
 	match: RegExp;
 	ttlMs: number;
-	fetch(origin: string, apiKey: string): Promise<{ seg: QuotaSeg | null; detail: string }>;
+	fetch(
+		origin: string,
+		apiKey: string,
+	): Promise<{ seg: QuotaSeg | null; detail: string }>;
 }
 
 // ---------- 用户配置（~/.pi/agent/statusbar.json，环境变量 PI_STATUSBAR_CONFIG 可覆盖路径） ----------
@@ -70,7 +80,8 @@ interface StatusbarConfig {
 	hideExtStatuses: string[];
 }
 
-const CONFIG_FILE = process.env.PI_STATUSBAR_CONFIG || join(homedir(), ".pi/agent/statusbar.json");
+const CONFIG_FILE =
+	process.env.PI_STATUSBAR_CONFIG || join(homedir(), ".pi/agent/statusbar.json");
 const DEFAULT_HIDE_EXT_STATUSES = ["LSP Inactive"];
 
 /** 读取配置；文件缺失或损坏时回落默认值（新会话时重读，改完配置开新会话即生效） */
@@ -79,7 +90,9 @@ function loadConfig(): StatusbarConfig {
 		const raw = JSON.parse(readFileSync(CONFIG_FILE, "utf8"));
 		return {
 			priceMap: raw?.priceMap ?? {},
-			hideExtStatuses: Array.isArray(raw?.hideExtStatuses) ? raw.hideExtStatuses : [...DEFAULT_HIDE_EXT_STATUSES],
+			hideExtStatuses: Array.isArray(raw?.hideExtStatuses)
+				? raw.hideExtStatuses
+				: [...DEFAULT_HIDE_EXT_STATUSES],
 		};
 	} catch {
 		return { priceMap: {}, hideExtStatuses: [...DEFAULT_HIDE_EXT_STATUSES] };
@@ -140,7 +153,8 @@ function estimateTokens(text: string): number {
 	let cjk = 0;
 	for (const ch of text) {
 		const code = ch.codePointAt(0) ?? 0;
-		if ((code >= 0x2e80 && code <= 0x9fff) || (code >= 0xff00 && code <= 0xffef)) cjk++;
+		if ((code >= 0x2e80 && code <= 0x9fff) || (code >= 0xff00 && code <= 0xffef))
+			cjk++;
 		else ascii++;
 	}
 	return ascii / 4 + cjk / 1.5;
@@ -148,7 +162,10 @@ function estimateTokens(text: string): number {
 
 /** 上下文占用条：▰▰▰▰▱▱▱▱▱▱ */
 function contextBar(percent: number, cells = 10): string {
-	const filled = Math.min(cells, Math.max(0, Math.round((percent / 100) * cells)));
+	const filled = Math.min(
+		cells,
+		Math.max(0, Math.round((percent / 100) * cells)),
+	);
 	return "▰".repeat(filled) + "▱".repeat(cells - filled);
 }
 
@@ -189,14 +206,26 @@ const QUOTA_SOURCES: QuotaSource[] = [
 				maxPercent = pct;
 			}
 			// 短窗口（如 5 小时）；detail 可能只有 remaining 没有 used
-			const UNIT_SEC: Record<string, number> = { TIME_UNIT_MINUTE: 60, TIME_UNIT_HOUR: 3600, TIME_UNIT_DAY: 86400 };
+			const UNIT_SEC: Record<string, number> = {
+				TIME_UNIT_MINUTE: 60,
+				TIME_UNIT_HOUR: 3600,
+				TIME_UNIT_DAY: 86400,
+			};
 			for (const lim of json?.limits ?? []) {
 				const d = lim?.detail ?? {};
 				const limit = parseFloat(d.limit);
 				if (!(limit > 0)) continue;
-				const used = d.used == null ? limit - parseFloat(d.remaining ?? limit) : parseFloat(d.used);
-				const hours = ((lim.window?.duration ?? 0) * (UNIT_SEC[lim.window?.timeUnit] ?? 60)) / 3600;
-				const label = hours >= 1 ? `${Math.round(hours)}h` : `${Math.max(1, Math.round(hours * 60))}m`;
+				const used =
+					d.used == null
+						? limit - parseFloat(d.remaining ?? limit)
+						: parseFloat(d.used);
+				const hours =
+					((lim.window?.duration ?? 0) * (UNIT_SEC[lim.window?.timeUnit] ?? 60)) /
+					3600;
+				const label =
+					hours >= 1
+						? `${Math.round(hours)}h`
+						: `${Math.max(1, Math.round(hours * 60))}m`;
 				const pct = (used / limit) * 100;
 				parts.push(`${label}${Math.round(pct)}%`);
 				maxPercent = Math.max(maxPercent ?? 0, pct);
@@ -205,7 +234,8 @@ const QUOTA_SOURCES: QuotaSource[] = [
 
 			const level = json?.user?.membership?.level;
 			let detail = `Kimi${level ? `（${level}）` : ""}`;
-			if (weekLimit > 0) detail += `\n  周配额: ${usage.used}/${usage.limit}${usage.resetTime ? `，重置于 ${usage.resetTime}` : ""}`;
+			if (weekLimit > 0)
+				detail += `\n  周配额: ${usage.used}/${usage.limit}${usage.resetTime ? `，重置于 ${usage.resetTime}` : ""}`;
 			for (const lim of json?.limits ?? []) {
 				const d = lim?.detail ?? {};
 				if (d.limit) detail += `\n  窗口: 剩余 ${d.remaining}/${d.limit}`;
@@ -227,16 +257,24 @@ const QUOTA_SOURCES: QuotaSource[] = [
 			if (!res.ok) throw new Error(`HTTP ${res.status}`);
 			const json: any = await res.json();
 			const limits: any[] = json?.data?.limits ?? [];
-			const windows = limits.filter((l) => l.type === "TOKENS_LIMIT" && typeof l.percentage === "number");
-			if (windows.length === 0) return { seg: null, detail: "响应中无 token 窗口" };
+			const windows = limits.filter(
+				(l) => l.type === "TOKENS_LIMIT" && typeof l.percentage === "number",
+			);
+			if (windows.length === 0)
+				return { seg: null, detail: "响应中无 token 窗口" };
 
-			const parts = windows.map((l) => `${glmWindowLabel(l.unit ?? 0, l.number ?? 1)} ${Math.round(l.percentage)}%`);
+			const parts = windows.map(
+				(l) =>
+					`${glmWindowLabel(l.unit ?? 0, l.number ?? 1)} ${Math.round(l.percentage)}%`,
+			);
 			const maxPercent = Math.max(...windows.map((l) => l.percentage));
 
 			let detail = `GLM${json?.data?.level ? `（${json.data.level}）` : ""}`;
-			for (const l of windows) detail += `\n  token ${glmWindowLabel(l.unit ?? 0, l.number ?? 1)} 窗口: ${l.percentage}%`;
+			for (const l of windows)
+				detail += `\n  token ${glmWindowLabel(l.unit ?? 0, l.number ?? 1)} 窗口: ${l.percentage}%`;
 			for (const l of limits) {
-				if (l.type === "TIME_LIMIT") detail += `\n  MCP 调用: ${l.currentValue}/${l.usage}`;
+				if (l.type === "TIME_LIMIT")
+					detail += `\n  MCP 调用: ${l.currentValue}/${l.usage}`;
 			}
 			return { seg: { text: `GLM ${parts.join("·")}`, maxPercent }, detail };
 		},
@@ -254,10 +292,16 @@ const QUOTA_SOURCES: QuotaSource[] = [
 			const json: any = await res.json();
 			const info = json?.balance_infos?.[0];
 			if (!info) return { seg: null, detail: "响应中无余额信息" };
-			const symbol = info.currency === "CNY" ? "¥" : info.currency === "USD" ? "$" : `${info.currency} `;
+			const symbol =
+				info.currency === "CNY"
+					? "¥"
+					: info.currency === "USD"
+						? "$"
+						: `${info.currency} `;
 			const total = parseFloat(info.total_balance);
 			let detail = `DeepSeek 余额 ${symbol}${info.total_balance}`;
-			if (parseFloat(info.granted_balance) > 0) detail += `（赠送 ${symbol}${info.granted_balance}）`;
+			if (parseFloat(info.granted_balance) > 0)
+				detail += `（赠送 ${symbol}${info.granted_balance}）`;
 			return { seg: { text: `DS ${symbol}${total.toFixed(1)}` }, detail };
 		},
 	},
@@ -274,10 +318,14 @@ const QUOTA_SOURCES: QuotaSource[] = [
 			const json: any = await res.json();
 			const total = json?.data?.total_credits;
 			const used = json?.data?.total_usage;
-			if (typeof total !== "number" || typeof used !== "number") return { seg: null, detail: "响应中无 credits 信息" };
+			if (typeof total !== "number" || typeof used !== "number")
+				return { seg: null, detail: "响应中无 credits 信息" };
 			const remain = total - used;
 			return {
-				seg: { text: `OR $${remain.toFixed(1)}`, maxPercent: total > 0 ? (used / total) * 100 : undefined },
+				seg: {
+					text: `OR $${remain.toFixed(1)}`,
+					maxPercent: total > 0 ? (used / total) * 100 : undefined,
+				},
 				detail: `OpenRouter 已用 $${used.toFixed(2)} / $${total.toFixed(2)}`,
 			};
 		},
@@ -293,7 +341,13 @@ export default function (pi: ExtensionAPI) {
 	let activeTui: TUI | null = null;
 	// 用量缓存：仅在分支条目数、末条目或单价表变化时重算，避免流式输出期间每帧全量遍历
 	let cacheKey = "";
-	let cachedUsage: UsageStats = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+	let cachedUsage: UsageStats = {
+		input: 0,
+		output: 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+		cost: 0,
+	};
 	// 首 token 耗时（TTFT）：before_provider_request 到首个 assistant message_start
 	let reqStartTs = 0;
 	let lastTtftMs: number | undefined;
@@ -330,13 +384,18 @@ export default function (pi: ExtensionAPI) {
 		bindings.length = 0;
 		quotaStates.clear();
 		for (const model of ctx.modelRegistry.getAvailable()) {
-			if (!model.baseUrl || bindings.some((b) => b.providerId === model.provider)) continue;
+			if (!model.baseUrl || bindings.some((b) => b.providerId === model.provider))
+				continue;
 			for (const source of QUOTA_SOURCES) {
 				if (bindings.some((b) => b.source.id === source.id)) continue;
 				if (source.match.test(model.baseUrl)) {
 					// baseUrl 非法时 new URL 会抛 TypeError，跳过该 provider 的额度绑定
 					try {
-						bindings.push({ source, providerId: model.provider, origin: new URL(model.baseUrl).origin });
+						bindings.push({
+							source,
+							providerId: model.provider,
+							origin: new URL(model.baseUrl).origin,
+						});
 					} catch {
 						// 忽略无法解析的 baseUrl
 					}
@@ -347,7 +406,11 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/** 带 TTL 与 inflight 去重的额度拉取；失败静默（保留旧值/空段） */
-	async function refreshQuota(b: QuotaBinding, ctx: ExtensionContext, force: boolean): Promise<void> {
+	async function refreshQuota(
+		b: QuotaBinding,
+		ctx: ExtensionContext,
+		force: boolean,
+	): Promise<void> {
 		let state = quotaStates.get(b.source.id);
 		if (!state) {
 			// 首次拉取：fetchedAt=0 视为已过期，立即请求
@@ -377,7 +440,10 @@ export default function (pi: ExtensionAPI) {
 	// ---------- 实时单价（models.dev） ----------
 
 	/** 读取磁盘缓存的价格表（24h 内有效） */
-	function loadPriceCache(): { fetchedAt: number; prices: Record<string, ModelCost> } | null {
+	function loadPriceCache(): {
+		fetchedAt: number;
+		prices: Record<string, ModelCost>;
+	} | null {
 		try {
 			const raw = JSON.parse(readFileSync(PRICE_CACHE_FILE, "utf8"));
 			if (raw?.fetchedAt && raw?.prices) return raw;
@@ -388,7 +454,10 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/** 拉取 models.dev 全量单价并投影到本地 provider:模型 键；失败静默保留旧值 */
-	async function refreshPrices(ctx: ExtensionContext, force: boolean): Promise<void> {
+	async function refreshPrices(
+		ctx: ExtensionContext,
+		force: boolean,
+	): Promise<void> {
 		if (priceInflight) return;
 		const cached = loadPriceCache();
 		if (cached) {
@@ -400,7 +469,9 @@ export default function (pi: ExtensionAPI) {
 
 		priceInflight = true;
 		try {
-			const res = await fetch(MODELS_DEV_URL, { signal: AbortSignal.timeout(20_000) });
+			const res = await fetch(MODELS_DEV_URL, {
+				signal: AbortSignal.timeout(20_000),
+			});
 			if (!res.ok) throw new Error(`HTTP ${res.status}`);
 			const json: any = await res.json();
 			const providers = json?.providers ?? json;
@@ -430,7 +501,11 @@ export default function (pi: ExtensionAPI) {
 				const c =
 					(bare ? providers?.[bare[0]]?.models?.[bare[1]]?.cost : undefined) ??
 					providers?.[m.provider]?.models?.[m.id]?.cost ??
-					byId.get(m.id.toLowerCase())?.reduce((a: any, b: any) => (a.input + a.output <= b.input + b.output ? a : b));
+					byId
+						.get(m.id.toLowerCase())
+						?.reduce((a: any, b: any) =>
+							a.input + a.output <= b.input + b.output ? a : b,
+						);
 				if (c) next[key] = toModelCost(c);
 			}
 			if (Object.keys(next).length === 0) throw new Error("未匹配到任何模型单价");
@@ -438,7 +513,10 @@ export default function (pi: ExtensionAPI) {
 			priceStamp = `net:${Date.now()}`;
 			priceSource = "models.dev(实时)";
 			try {
-				writeFileSync(PRICE_CACHE_FILE, JSON.stringify({ fetchedAt: Date.now(), prices: next }));
+				writeFileSync(
+					PRICE_CACHE_FILE,
+					JSON.stringify({ fetchedAt: Date.now(), prices: next }),
+				);
 			} catch {
 				// 写缓存失败不影响使用
 			}
@@ -486,7 +564,13 @@ export default function (pi: ExtensionAPI) {
 		const key = `${ctx.sessionManager.getSessionId()}:${branch.length}:${branch.at(-1)?.id ?? ""}:${priceStamp}`;
 		if (key === cacheKey) return cachedUsage;
 
-		const stats: UsageStats = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+		const stats: UsageStats = {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			cost: 0,
+		};
 		for (const e of branch) {
 			if (e.type === "message" && e.message.role === "assistant") {
 				const usage = (e.message as AssistantMessage).usage;
@@ -546,7 +630,10 @@ export default function (pi: ExtensionAPI) {
 					if (branch) {
 						segs.push({ text: theme.fg("accent", branch), pri: 0 });
 					} else {
-						segs.push({ text: theme.fg("muted", basename(ctx.cwd) || ctx.cwd), pri: 0 });
+						segs.push({
+							text: theme.fg("muted", basename(ctx.cwd) || ctx.cwd),
+							pri: 0,
+						});
 					}
 
 					// 上下文占用
@@ -556,15 +643,23 @@ export default function (pi: ExtensionAPI) {
 							// 压缩后或下次响应前 tokens 未知
 							segs.push({ text: theme.fg("dim", "ctx —"), pri: 0 });
 						} else {
-							const color = cu.percent >= 90 ? "error" : cu.percent >= 75 ? "warning" : "success";
-							segs.push({ text: theme.fg(color, `${contextBar(cu.percent)} ${Math.round(cu.percent)}%`), pri: 0 });
+							const color =
+								cu.percent >= 90 ? "error" : cu.percent >= 75 ? "warning" : "success";
+							segs.push({
+								text: theme.fg(
+									color,
+									`${contextBar(cu.percent)} ${Math.round(cu.percent)}%`,
+								),
+								pri: 0,
+							});
 						}
 					}
 
 					// 当前模型 + 思考强度（off 时不显示强度）
 					if (ctx.model?.id) {
 						const level = pi.getThinkingLevel();
-						const label = level && level !== "off" ? `${ctx.model.id}·${level}` : ctx.model.id;
+						const label =
+							level && level !== "off" ? `${ctx.model.id}·${level}` : ctx.model.id;
 						segs.push({ text: theme.fg("muted", label), pri: 1 });
 					}
 
@@ -581,25 +676,48 @@ export default function (pi: ExtensionAPI) {
 					segs.push({ text: theme.fg("muted", parts.join(" ")), pri: 2 });
 
 					// 首 token 耗时（最近一次请求，未完成时不显示）
-					if (lastTtftMs != null) segs.push({ text: theme.fg("muted", `⏱${fmtMs(lastTtftMs)}`), pri: 2 });
+					if (lastTtftMs != null)
+						segs.push({ text: theme.fg("muted", `⏱${fmtMs(lastTtftMs)}`), pri: 2 });
 
 					// 输出吞吐：生成中显示按字符估算的实时值（~ 前缀），否则显示最近一次响应的精确值
 					const liveSecs = firstTokTs ? (Date.now() - firstTokTs) / 1000 : 0;
-					if (firstTokTs && liveTokens > 0 && liveSecs >= 0.3 && Date.now() - liveTs < 5000) {
-						segs.push({ text: theme.fg("muted", `~${fmtTps(liveTokens / liveSecs)} tok/s`), pri: 2 });
+					if (
+						firstTokTs &&
+						liveTokens > 0 &&
+						liveSecs >= 0.3 &&
+						Date.now() - liveTs < 5000
+					) {
+						segs.push({
+							text: theme.fg("muted", `~${fmtTps(liveTokens / liveSecs)} tok/s`),
+							pri: 2,
+						});
 					} else if (lastTps != null) {
-						segs.push({ text: theme.fg("muted", `${fmtTps(lastTps)} tok/s`), pri: 2 });
+						segs.push({
+							text: theme.fg("muted", `${fmtTps(lastTps)} tok/s`),
+							pri: 2,
+						});
 					}
 
 					// 订阅额度：只显示当前模型所属 provider 的源，切模型即切换；无缓存或过期则异步刷新
 					const curProvider = ctx.model?.provider;
-					const active = curProvider == null ? undefined : bindings.find((b) => b.providerId === curProvider);
+					const active =
+						curProvider == null
+							? undefined
+							: bindings.find((b) => b.providerId === curProvider);
 					if (active) {
 						const state = quotaStates.get(active.source.id);
-						if (!state || Date.now() - state.fetchedAt >= active.source.ttlMs) void refreshQuota(active, ctx, false);
+						if (!state || Date.now() - state.fetchedAt >= active.source.ttlMs)
+							void refreshQuota(active, ctx, false);
 						if (state?.seg) {
 							const p = state.seg.maxPercent;
-								const color = p == null ? "muted" : p >= 85 ? "error" : p >= 60 ? "warning" : "success";
+							const color =
+								p == null
+									? "muted"
+									: p >= 85
+										? "error"
+										: p >= 60
+											? "warning"
+											: "success";
 							segs.push({ text: theme.fg(color, state.seg.text), pri: 2 });
 						}
 					}
@@ -612,8 +730,11 @@ export default function (pi: ExtensionAPI) {
 					}
 
 					// 超宽时按 pri 从大到小逐段丢弃
-					const join = (list: Segment[]) => truncateToWidth(list.map((s) => s.text).join(sep), width);
-					const dropOrder = segs.map((_, i) => i).sort((a, b) => segs[b].pri - segs[a].pri);
+					const join = (list: Segment[]) =>
+						truncateToWidth(list.map((s) => s.text).join(sep), width);
+					const dropOrder = segs
+						.map((_, i) => i)
+						.sort((a, b) => segs[b].pri - segs[a].pri);
 					let out = segs;
 					let di = 0;
 					while (visibleWidth(join(out)) > width && di < dropOrder.length) {
@@ -656,7 +777,9 @@ export default function (pi: ExtensionAPI) {
 			}
 			await Promise.all(bindings.map((b) => refreshQuota(b, ctx, true)));
 			const line = bindings
-				.map((b) => `${b.source.id}: ${quotaStates.get(b.source.id)?.detail ?? "—"}`)
+				.map(
+					(b) => `${b.source.id}: ${quotaStates.get(b.source.id)?.detail ?? "—"}`,
+				)
 				.join("；")
 				.replace(/\n/g, " ");
 			ctx.ui.notify(line, "info");
