@@ -39,6 +39,7 @@ import type {
 import {
 	truncateToWidth,
 	visibleWidth,
+	wrapTextWithAnsi,
 	type Component,
 	type TUI,
 } from "@earendil-works/pi-tui";
@@ -708,9 +709,26 @@ export default function (pi: ExtensionAPI) {
 		// 当前模型 + 思考强度（off 时不显示强度）
 		if (ctx.model?.id) {
 			const level = pi.getThinkingLevel();
-			const label =
-				level && level !== "off" ? `${ctx.model.id}·${level}` : ctx.model.id;
-			segs.push({ label: "Model", text: theme.fg("muted", label), pri: 1 });
+			if (variant === "panel") {
+				// 面板竖排：模型与思考强度分行，避免长模型名被截断
+				segs.push({
+					label: "Model",
+					text: theme.fg("muted", ctx.model.id),
+					pri: 1,
+				});
+				if (level && level !== "off")
+					segs.push({
+						label: "Effort",
+						text: theme.fg("muted", level),
+						pri: 1,
+					});
+			} else {
+				const label =
+					level && level !== "off"
+						? `${ctx.model.id}·${level}`
+						: ctx.model.id;
+				segs.push({ label: "Model", text: theme.fg("muted", label), pri: 1 });
+			}
 		}
 
 		// token 用量、缓存命中率与花费
@@ -828,16 +846,16 @@ export default function (pi: ExtensionAPI) {
 			for (const s of buildSegments(ctx, th, fd, "panel")) {
 				if (s.label) {
 					const valueW = Math.max(1, innerW - 2 - PANEL_LABEL_W - 1);
-					lines.push(
-						row(
-							" " +
-								th.fg("dim", s.label.padEnd(PANEL_LABEL_W)) +
-								" " +
-								truncateToWidth(s.text, valueW),
-						),
-					);
+					const valueLines = wrapTextWithAnsi(s.text, valueW);
+					valueLines.forEach((line, i) => {
+						const labelCol =
+							i === 0 ? th.fg("dim", s.label.padEnd(PANEL_LABEL_W)) : " ".repeat(PANEL_LABEL_W);
+						lines.push(row(" " + labelCol + " " + line));
+					});
 				} else {
-					lines.push(row(" " + truncateToWidth(s.text, innerW - 2)));
+					for (const line of wrapTextWithAnsi(s.text, innerW - 2)) {
+						lines.push(row(" " + line));
+					}
 				}
 			}
 			lines.push(border("└", "┘"));
