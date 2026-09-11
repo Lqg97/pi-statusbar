@@ -14,10 +14,10 @@
  *     DeepSeek 余额（deepseek.com）              → 按量账户余额
  *     OpenRouter 额度（openrouter.ai）           → 剩余 credits
  *   带 TTL 缓存，失败静默；/quota 强制刷新并显示详情
- * - 窄终端按 扩展状态 → 额度/token → 模型 的顺序收起，始终保留分支与上下文
+ * - 窄终端先按 扩展状态 → 额度/token → 模型 的顺序收起，仍放不下则整段换行成多行（分支与上下文永不丢弃）
  * - 布局可配置（layout）：bottom 底部单行 / right 右侧悬浮竖卡面板 / auto（默认）
  *   auto 按终端宽度自动选择：≥120 列用右侧面板，否则底部单行，resize 实时切换；
- *   右侧面板为非捕获浮层（不抢键盘焦点），宽度由 rightWidth 配置（默认 28 列）；
+ *   右侧面板为非捕获浮层（不抢键盘焦点），宽度由 rightWidth 配置（默认 32 列）；
  *   注意：面板浮在聊天内容之上，会遮住右缘内容（pi 扩展 API 不支持真布局分栏）；
  *   /statusbar-layout [right|bottom|auto] 运行时切换，不带参数循环
  * - /statusbar 切换回内置 footer，新会话默认恢复自定义样式
@@ -25,7 +25,7 @@
  *     priceMap         本地模型 → models.dev 单价映射，key 为 "provider:model" 或裸 "model"
  *     hideExtStatuses  按文本包含隐藏的其他扩展状态（默认 ["LSP Inactive"]）
  *     layout           "bottom" | "right" | "auto"（默认 "auto"）
- *     rightWidth       右侧面板宽度，默认 28，范围 [20, 60]
+ *     rightWidth       右侧面板宽度，默认 32，范围 [20, 60]
  *   未配置 priceMap 时按模型 id 在 models.dev 全量中自动匹配（同名取最便宜），零配置可用；
  *   配置在新会话时重读，改完开新会话即生效
  */
@@ -95,7 +95,7 @@ interface StatusbarConfig {
 	hideExtStatuses: string[];
 	/** 布局模式，默认 auto：终端 ≥120 列时右侧面板，否则底部单行 */
 	layout: LayoutMode;
-	/** 右侧面板宽度（列），默认 28，读取时 clamp 到 [20, 60] */
+	/** 右侧面板宽度（列），默认 32，读取时 clamp 到 [20, 60] */
 	rightWidth: number;
 }
 
@@ -103,7 +103,7 @@ const CONFIG_FILE =
 	process.env.PI_STATUSBAR_CONFIG || join(homedir(), ".pi/agent/statusbar.json");
 const DEFAULT_HIDE_EXT_STATUSES = ["LSP Inactive"];
 const DEFAULT_LAYOUT: LayoutMode = "auto";
-const DEFAULT_RIGHT_WIDTH = 28;
+const DEFAULT_RIGHT_WIDTH = 32;
 /** auto 模式阈值：终端列数 ≥ 该值时使用右侧面板 */
 const AUTO_MIN_WIDTH = 120;
 
@@ -116,10 +116,27 @@ function toRightWidth(v: unknown): number {
 	return Math.min(60, Math.max(20, Math.round(v)));
 }
 
-/** 读取配置；文件缺失或损坏时回落默认值（新会话时重读，改完配置开新会话即生效） */
+/** 去除 jsonc 行注释（保留字符串内的 //，如 URL） */
+function stripJsonComments(s: string): string {
+	return s
+		.split("\n")
+		.map((line) => {
+			let inStr = false;
+			for (let i = 0; i < line.length; i++) {
+				const c = line[i];
+				if (c === '"' && line[i - 1] !== "\\") inStr = !inStr;
+				if (!inStr && c === "/" && line[i + 1] === "/")
+					return line.slice(0, i);
+			}
+			return line;
+		})
+		.join("\n");
+}
+
+/** 读取配置（支持 jsonc 行注释）；文件缺失或损坏时回落默认值（新会话时重读，改完配置开新会话即生效） */
 function loadConfig(): StatusbarConfig {
 	try {
-		const raw = JSON.parse(readFileSync(CONFIG_FILE, "utf8"));
+		const raw = JSON.parse(stripJsonComments(readFileSync(CONFIG_FILE, "utf8")));
 		return {
 			priceMap: raw?.priceMap ?? {},
 			hideExtStatuses: Array.isArray(raw?.hideExtStatuses)
@@ -947,19 +964,37 @@ export default function (pi: ExtensionAPI) {
 					const sep = theme.fg("dim", " │ ");
 					const segs = buildSegments(ctx, theme, footerData, "footer");
 
-					// 超宽时按 pri 从大到小逐段丢弃
-					const join = (list: Segment[]) =>
-						truncateToWidth(list.map((s) => s.text).join(sep), width);
+					// 超宽时先按 pri 从大到小丢弃可牺牲段（保留 pri=0 的分支/上下文），
+					// 仍放不下则换行成多行，段保持完整不拆
+					const join = (list: Segment[]) => list.map((s) => s.text).join(sep);
 					const dropOrder = segs
 						.map((_, i) => i)
 						.sort((a, b) => segs[b].pri - segs[a].pri);
 					let out = segs;
 					let di = 0;
-					while (visibleWidth(join(out)) > width && di < dropOrder.length) {
+					while (
+						di < dropOrder.length &&
+						segs[dropOrder[di]].pri > 0 &&
+						visibleWidth(truncateToWidth(join(out), width)) > width
+					) {
 						const victim = segs[dropOrder[di++]];
 						out = out.filter((s) => s !== victim);
 					}
-					return [join(out)];
+					const rows: string[] = [];
+					let rowSegs: Segment[] = [];
+					for (const s of out) {
+						const cand = rowSegs.length ? [...rowSegs, s] : [s];
+						const line = join(cand);
+						if (rowSegs.length && visibleWidth(line) > width) {
+							rows.push(truncateToWidth(join(rowSegs), width));
+							rowSegs = [s];
+						} else {
+							rowSegs = cand;
+						}
+					}
+					if (rowSegs.length)
+						rows.push(truncateToWidth(join(rowSegs), width));
+					return rows;
 				},
 			};
 		});
