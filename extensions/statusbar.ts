@@ -10,10 +10,12 @@
  *   失败时回落 models.json 的 cost 字段；/statusbar prices 强制刷新并显示当前模型单价来源
  * - 上下文占用 ≥75% 变黄，≥90% 变红
  * - 订阅额度自动发现（按 provider baseUrl 匹配，只显示当前模型所属 provider 的额度）：
- *     GLM Coding Plan（bigmodel.cn / z.ai）      → 5h/周 token 窗口百分比
- *     DeepSeek 余额（deepseek.com）              → 按量账户余额
- *     OpenRouter 额度（openrouter.ai）           → 剩余 credits
- *   带 TTL 缓存，失败静默；/statusbar quota 强制刷新并显示详情
+ *     GLM Coding Plan（bigmodel.cn / z.ai）      → 5h/周 token 窗口百分比 + 恢复倒计时
+ *     Kimi（api.kimi.com）                       → 短窗口/周配额百分比 + 恢复倒计时
+ *     DeepSeek 余额（deepseek.com）              → 按量账户余额（无重置概念）
+ *     OpenRouter 额度（openrouter.ai）           → 剩余 credits（无重置概念）
+ *   每个窗口用量后括注 (恢复倒计时)（45s/13m/2h13m/6d4h；不足 24h 按 xhyym，超 24h 按 xdyyh，渲染时按重置时刻实时换算）；
+ *   底部单行各窗口用 · 连接，右侧面板逐窗口分行；带 TTL 缓存，失败静默；/statusbar quota 强制刷新并显示详情
  * - /exit 为 /quit 的别名，优雅退出 pi
  * - 窄终端先按 扩展状态 → 额度/token → 模型 的顺序收起，仍放不下则整段换行成多行（分支与上下文永不丢弃）
  * - 布局可配置（layout）：bottom 底部单行 / right 右侧悬浮竖卡面板 / auto（默认）
@@ -71,9 +73,16 @@ interface Segment {
 	key?: MetricKey;
 }
 
-/** 额度源渲染出的短文本与最大占用百分比（决定颜色） */
+/** 额度源单个窗口的渲染文本（面板逐窗口分行，底部用 · 连接成一行） */
+interface QuotaRow {
+	text: string;
+	percent?: number;
+}
+
+/** 额度源渲染出的短文本与最大占用百分比（决定颜色）；rows 有值时右侧面板逐窗口分行展示 */
 interface QuotaSeg {
 	text: string;
+	rows?: QuotaRow[];
 	maxPercent?: number;
 }
 
@@ -347,6 +356,53 @@ function contextBar(percent: number, cells = 10): string {
 	return "▰".repeat(filled) + "▱".repeat(cells - filled);
 }
 
+/**
+ * 把接口返回的「重置时刻」统一成毫秒时间戳：
+ * GLM 给毫秒数字（nextResetTime），Kimi 给 ISO 字符串（resetTime / reset_time）。
+ */
+function toResetAt(v: unknown): number | undefined {
+	if (typeof v === "number" && Number.isFinite(v) && v > 0) return v;
+	if (typeof v === "string") {
+		const t = Date.parse(v);
+		if (!Number.isNaN(t)) return t;
+	}
+	return undefined;
+}
+
+/** 恢复倒计时：45s / 13m / 2h13m / 6d4h；时刻缺失或已过期时返回空串 */
+function fmtCountdown(ms: number | undefined): string {
+	if (ms == null || !Number.isFinite(ms)) return "";
+	const diff = ms - Date.now();
+	if (diff <= 0) return "";
+	if (diff < 60_000) return `${Math.max(1, Math.round(diff / 1000))}s`;
+	if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m`;
+	if (diff < 86_400_000)
+		return `${Math.floor(diff / 3_600_000)}h${Math.floor((diff % 3_600_000) / 60_000)}m`;
+	return `${Math.floor(diff / 86_400_000)}d${Math.floor((diff % 86_400_000) / 3_600_000)}h`;
+}
+
+/** 重置时刻的本地钟点：`2026-09-15 13:47`（/quota 详情用） */
+function fmtResetClock(ms: number | undefined): string {
+	if (ms == null || !Number.isFinite(ms)) return "";
+	const d = new Date(ms);
+	const p = (n: number) => `${n}`.padStart(2, "0");
+	return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/** 给窗口文本追加恢复倒计时：`5h 86%` → `5h 86%(2h13m)` */
+function withReset(text: string, resetAt: number | undefined): string {
+	const cd = fmtCountdown(resetAt);
+	return cd ? `${text}(${cd})` : text;
+}
+
+/** /quota 详情里的重置说明：`，重置于 2026-09-15 13:47（2h13m）` */
+function resetDetail(at: number | undefined): string {
+	const clock = fmtResetClock(at);
+	if (!clock) return "";
+	const cd = fmtCountdown(at);
+	return `，重置于 ${clock}${cd ? `（${cd}）` : ""}`;
+}
+
 /** GLM 窗口标签：unit=3 小时 / 6 周 / 5 月 / 4 天，其余原样输出 */
 function glmWindowLabel(unit: number, num: number): string {
 	if (unit === 3) return `${num}h`;
@@ -374,15 +430,9 @@ const QUOTA_SOURCES: QuotaSource[] = [
 			const json: any = await res.json();
 			const usage = json?.usage ?? {};
 			const parts: string[] = [];
+			const rows: QuotaRow[] = [];
 			let maxPercent: number | undefined;
 
-			// 周配额
-			const weekLimit = parseFloat(usage.limit);
-			if (weekLimit > 0) {
-				const pct = (parseFloat(usage.used) / weekLimit) * 100;
-				parts.push(`周${Math.round(pct)}%`);
-				maxPercent = pct;
-			}
 			// 短窗口（如 5 小时）；detail 可能只有 remaining 没有 used
 			const UNIT_SEC: Record<string, number> = {
 				TIME_UNIT_MINUTE: 60,
@@ -405,21 +455,38 @@ const QUOTA_SOURCES: QuotaSource[] = [
 						? `${Math.round(hours)}h`
 						: `${Math.max(1, Math.round(hours * 60))}m`;
 				const pct = (used / limit) * 100;
-				parts.push(`${label}${Math.round(pct)}%`);
+				const at = toResetAt(d.resetTime);
+				const text = withReset(`${label} ${Math.round(pct)}%`, at);
+				parts.push(text);
+				rows.push({ text, percent: pct });
+				maxPercent = Math.max(maxPercent ?? 0, pct);
+			}
+			// 周配额
+			const weekLimit = parseFloat(usage.limit);
+			if (weekLimit > 0) {
+				const pct = (parseFloat(usage.used) / weekLimit) * 100;
+				const at = toResetAt(usage.resetTime);
+				const text = withReset(`周 ${Math.round(pct)}%`, at);
+				parts.push(text);
+				rows.push({ text, percent: pct });
 				maxPercent = Math.max(maxPercent ?? 0, pct);
 			}
 			if (parts.length === 0) return { seg: null, detail: "响应中无用量数据" };
 
 			const level = json?.user?.membership?.level;
 			let detail = `Kimi${level ? `（${level}）` : ""}`;
-			if (weekLimit > 0)
-				detail += `\n  周配额: ${usage.used}/${usage.limit}${usage.resetTime ? `，重置于 ${usage.resetTime}` : ""}`;
 			for (const lim of json?.limits ?? []) {
 				const d = lim?.detail ?? {};
-				if (d.limit) detail += `\n  窗口: 剩余 ${d.remaining}/${d.limit}`;
+				if (d.limit)
+					detail += `\n  窗口: 剩余 ${d.remaining}/${d.limit}${resetDetail(toResetAt(d.resetTime))}`;
 			}
+			if (weekLimit > 0)
+				detail += `\n  周配额: ${usage.used}/${usage.limit}${resetDetail(toResetAt(usage.resetTime))}`;
 			if (json?.limited) detail += "\n  ⚠ 当前限流中";
-			return { seg: { text: `Kimi ${parts.join("·")}`, maxPercent }, detail };
+			return {
+				seg: { text: `Kimi ${parts.join("·")}`, rows, maxPercent },
+				detail,
+			};
 		},
 	},
 	{
@@ -441,20 +508,29 @@ const QUOTA_SOURCES: QuotaSource[] = [
 			if (windows.length === 0)
 				return { seg: null, detail: "响应中无 token 窗口" };
 
-			const parts = windows.map(
-				(l) =>
+			const parts: string[] = [];
+			const rows: QuotaRow[] = [];
+			for (const l of windows) {
+				const text = withReset(
 					`${glmWindowLabel(l.unit ?? 0, l.number ?? 1)} ${Math.round(l.percentage)}%`,
-			);
+					toResetAt(l.nextResetTime),
+				);
+				parts.push(text);
+				rows.push({ text, percent: l.percentage });
+			}
 			const maxPercent = Math.max(...windows.map((l) => l.percentage));
 
 			let detail = `GLM${json?.data?.level ? `（${json.data.level}）` : ""}`;
 			for (const l of windows)
-				detail += `\n  token ${glmWindowLabel(l.unit ?? 0, l.number ?? 1)} 窗口: ${l.percentage}%`;
+				detail += `\n  token ${glmWindowLabel(l.unit ?? 0, l.number ?? 1)} 窗口: ${l.percentage}%${resetDetail(toResetAt(l.nextResetTime))}`;
 			for (const l of limits) {
 				if (l.type === "TIME_LIMIT")
 					detail += `\n  MCP 调用: ${l.currentValue}/${l.usage}`;
 			}
-			return { seg: { text: `GLM ${parts.join("·")}`, maxPercent }, detail };
+			return {
+				seg: { text: `GLM ${parts.join("·")}`, rows, maxPercent },
+				detail,
+			};
 		},
 	},
 	{
@@ -951,15 +1027,27 @@ export default function (pi: ExtensionAPI) {
 			if (!state || Date.now() - state.fetchedAt >= active.source.ttlMs)
 				void refreshQuota(active, ctx, false);
 			if (state?.seg) {
-				const p = state.seg.maxPercent;
-				const color =
-					p == null ? "muted" : p >= 85 ? "error" : p >= 60 ? "warning" : "success";
-				segs.push({
-					label: "Quota",
-					text: theme.fg(color, state.seg.text),
-					pri: 2,
-					key: "quota",
-				});
+				const colorOf = (p: number | undefined) => {
+					if (p == null) return "muted";
+					return p >= 85 ? "error" : p >= 60 ? "warning" : "success";
+				};
+				// 面板值列窄：逐窗口分行（每行自带恢复倒计时），底部单行各窗口用 · 连接
+				if (variant === "panel" && state.seg.rows?.length) {
+					for (const r of state.seg.rows)
+						segs.push({
+							label: "Quota",
+							text: theme.fg(colorOf(r.percent), r.text),
+							pri: 2,
+							key: "quota",
+						});
+				} else {
+					segs.push({
+						label: "Quota",
+						text: theme.fg(colorOf(state.seg.maxPercent), state.seg.text),
+						pri: 2,
+						key: "quota",
+					});
+				}
 			}
 		}
 
@@ -1376,11 +1464,11 @@ export default function (pi: ExtensionAPI) {
 				const name = metricName(m);
 				const mark = cur ? th.fg("accent", "❯") : " ";
 				const icon = shown ? th.fg("success", "●") : th.fg("dim", "○");
-				const text = !shown
-					? th.fg("dim", name)
-					: cur
+				const text = shown
+					? cur
 						? th.fg("text", name)
-						: th.fg("muted", name);
+						: th.fg("muted", name)
+					: th.fg("dim", name);
 				lines.push(truncateToWidth(`  ${mark} ${icon} ${text}`, width));
 			});
 			lines.push("");
@@ -1501,12 +1589,11 @@ export default function (pi: ExtensionAPI) {
 
 			// 子命令快捷方式（脚本/RPC 友好，跳过交互菜单）
 			if (sub === "on" || sub === "off") {
-				if ((sub === "on") !== userWants) toggleStatusbar(ctx);
-				else
+				if ((sub === "on") === userWants) 
 					ctx.ui.notify(
 						sub === "on" ? "自定义状态栏已启用" : "已是内置 footer",
 						"info",
-					);
+					); else toggleStatusbar(ctx);
 				return;
 			}
 			if (sub === "layout") {

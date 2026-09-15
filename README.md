@@ -3,7 +3,7 @@
 [pi](https://github.com/badlogic/pi-mono) 自定义状态栏扩展：展示 git 分支、token 用量、实时花费、首 token 耗时、输出吞吐、上下文占用与订阅额度。支持两种布局：**底部单行 footer** 与类 opencode 的**右侧悬浮信息面板**，可固定其一或按终端宽度自动切换（auto，默认）。
 
 ```text
-main │ ↑12.3k ↓45.6k ⚡100k·85% $0.123 ⏱980ms 128 tok/s │ ▰▰▰▱▱▱▱▱▱▱ 23% │ GLM 5h 12%·周 34% │ glm-5.3·high │ LSP Active
+main │ ↑12.3k ↓45.6k ⚡100k·85% $0.123 ⏱980ms 128 tok/s │ ▰▰▰▱▱▱▱▱▱▱ 23% │ GLM 5h 12%(3h56m)·1周 34%(6d10h) │ glm-5.3·high │ LSP Active
 ```
 
 ## 功能
@@ -12,11 +12,13 @@ main │ ↑12.3k ↓45.6k ⚡100k·85% $0.123 ⏱980ms 128 tok/s │ ▰▰▰�
 - **实时单价**：从 [models.dev](https://models.dev) 拉取官方单价计算花费（本地缓存 24h），失败回落 models.json 的 cost 字段；`/statusbar prices` 强制刷新并显示单价来源
 - **上下文告警**：占用 ≥75% 变黄，≥90% 变红
 - **订阅额度自动发现**：按 provider baseUrl 匹配，只显示当前模型所属 provider 的额度：
-  - GLM Coding Plan（bigmodel.cn / z.ai）→ 5h/周 token 窗口百分比
-  - Kimi（api.kimi.com）→ 周配额与短窗口用量
-  - DeepSeek（deepseek.com）→ 按量账户余额
-  - OpenRouter（openrouter.ai）→ 剩余 credits
-  - `/statusbar quota` 强制刷新并显示详情
+  - GLM Coding Plan（bigmodel.cn / z.ai）→ 5h/周 token 窗口百分比 + 恢复倒计时
+  - Kimi（api.kimi.com）→ 短窗口/周配额百分比 + 恢复倒计时
+  - DeepSeek（deepseek.com）→ 按量账户余额（按量计费，无重置概念）
+  - OpenRouter（openrouter.ai）→ 剩余 credits（按量计费，无重置概念）
+  - 每个窗口用量后括注恢复倒计时（`45s` / `13m` / `2h13m` / `6d4h`：不足 24h 按 `xhyym`，超 24h 按 `xdyyh`，渲染时按重置时刻实时换算，时刻缺失则不显示）；底部单行各窗口用 `·` 连接，右侧面板逐窗口分行
+  - `/statusbar quota` 强制刷新并显示详情（含各窗口「重置于 2026-09-15 15:45（3h56m）」）
+
 - **终端标题**：会话名写入终端标题（`pi · 会话名`），不占 footer 宽度
 - **窄终端自适应**：按 扩展状态 → 额度/token → 模型 的顺序逐段收起，仍放不下时整段换行成多行（分支与上下文永不丢弃）
 - **布局可选（layout）**：`bottom` 底部单行 / `right` 右侧悬浮竖卡面板（Model 与 Effort 分行显示，超长自动换行不截断）/ `auto`（默认）按终端宽度自动选择（≥120 列用右侧面板），拖拽 resize 实时切换
