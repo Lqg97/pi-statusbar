@@ -18,18 +18,28 @@
  *   底部单行各窗口用 · 连接，右侧面板逐窗口分行；带 TTL 缓存，失败静默；/statusbar quota 强制刷新并显示详情
  * - /exit 为 /quit 的别名，优雅退出 pi
  * - 窄终端先按 扩展状态 → 额度/token → 模型 的顺序收起，仍放不下则整段换行成多行（分支与上下文永不丢弃）
- * - 布局可配置（layout）：bottom 底部单行 / right 右侧悬浮竖卡面板 / auto（默认）
+ * - 布局可配置（layout）：bottom 底部单行 / right 右侧悬浮竖卡面板 / auto（默认）/ split 真分栏
  *   auto 按终端宽度自动选择：≥120 列用右侧面板，否则底部单行，resize 实时切换；
  *   右侧面板为非捕获浮层（不抢键盘焦点），宽度由 rightWidth 配置（默认 32 列）；
- *   注意：面板浮在聊天内容之上，会遮住右缘内容（pi 扩展 API 不支持真布局分栏）；
- *   /statusbar 无参数打开交互式菜单（布局 ◀▶ 调值 / 指标显隐 / 启停；Enter 确认，Esc 退出），
- *   或子命令快捷方式：/statusbar [on|off] | layout [right|bottom|auto] | metrics
+ *   注意：浮层浮在聊天内容之上，会遮住右缘内容（regular 模式没有布局树，pi 扩展 API 无法真分栏）；
+ *   split = 真分栏（类 opencode：把核心布局根包进 HStack，聊天按剩余宽度重新换行，完全不遮挡），
+ *   只要宽度 ≥ rightWidth+24 就用分栏（不套 auto 的 120 列阈值）；
+ *   真分栏只在 fullscreen 模式（alt-screen）下成立，regular 模式/极窄终端自动退回底部单行，
+ *   且不再创建浮层（浮层会挡住 /settings 切换 TUI mode）；
+ *   /statusbar 无参数打开交互式菜单（布局 ◀▶ 调值 / 面板边框 / 指标显隐 / 启停；Enter 确认，Esc 退出），
+ *   或子命令快捷方式：/statusbar [on|off] | layout [right|bottom|auto|split] | split [on|off] | metrics
  * - 新会话默认恢复自定义样式
  * - 用户配置 ~/.pi/agent/statusbar.json（环境变量 PI_STATUSBAR_CONFIG 可覆盖路径）：
  *     priceMap         本地模型 → models.dev 单价映射，key 为 "provider:model" 或裸 "model"
  *     hideExtStatuses  按文本包含隐藏的其他扩展状态（默认 ["LSP Inactive"]）
- *     layout           "bottom" | "right" | "auto"（默认 "auto"）
+ *     layout           "bottom" | "right" | "auto" | "split"（默认 "auto"）；split = 真分栏，
+ *                      旧配置的 split: true 会自动迁移为 layout: "split"
  *     rightWidth       右侧面板宽度，默认 32，范围 [20, 60]
+ *     panelBorder      面板边框字符集 "auto"（默认，按终端自动判定）| "unicode"（┌─┐│└┘）| "ascii"（+ - |）；
+ *                      auto 在 TERM_PROGRAM=vscode（VSCode/Cursor 内置终端）时用 ascii：
+ *                      这类终端对 U+2500 段方框字符走「自绘字形」通道，重绘不彻底时会留下
+ *                      只有边框错位的残影；换 ascii 后与文字同层即可绕开。
+ *                      也可用 /statusbar border [auto|unicode|ascii] 切换，或环境变量 PI_STATUSBAR_BORDER 覆盖
  *     hiddenMetrics    隐藏的指标 key 数组，可选：branch/ctx/model/effort/usage/ttft/speed/quota/ext；
  *                      也可用 /statusbar metrics 交互式配置（会写回此字段）
  *     language         配置面板显示语言 "zh" | "en"（默认 "zh"）；/statusbar 菜单语言行 ←→ 切换并即时写回
@@ -43,6 +53,12 @@ import type {
 	ReadonlyFooterDataProvider,
 	Theme,
 } from "@earendil-works/pi-coding-agent";
+// 同上：getSettingsPath 用于「开真分栏时自动把 pi 的 TUI mode 设为 fullscreen」，
+// 命名空间导入避免旧版没有该导出时在链接期抛错
+import * as piAgentRuntime from "@earendil-works/pi-coding-agent";
+// 命名空间导入：HStack 在旧版 pi-tui 中不存在，命名导入会在链接期直接抛错，
+// 命名空间导入只是取到 undefined，便于「有就用真分栏，没有就静默降级」
+import * as piTuiRuntime from "@earendil-works/pi-tui";
 import {
 	matchesKey,
 	truncateToWidth,
@@ -99,8 +115,14 @@ interface QuotaSource {
 
 // ---------- 用户配置（~/.pi/agent/statusbar.json，环境变量 PI_STATUSBAR_CONFIG 可覆盖路径） ----------
 
-/** 状态栏布局：bottom 底部单行 / right 右侧悬浮面板 / auto 按终端宽度自动选择 */
-type LayoutMode = "bottom" | "right" | "auto";
+/** 状态栏布局：
+ *  bottom      底部单行 footer
+ *  right       右侧面板（浮层，始终）
+ *  auto        终端列数 ≥ AUTO_MIN_WIDTH 时用右侧面板，否则底部单行（默认）
+ *  split       真分栏（fullscreen 布局分栏，聊天按剩余宽度重新换行、完全不遮挡）；
+ *              宽度 ≥ rightWidth + 24 时生效，否则回退底部单行；regular 模式/缺 HStack 同样回退
+ */
+type LayoutMode = "bottom" | "right" | "auto" | "split";
 
 interface StatusbarConfig {
 	/** 本地模型 → models.dev 单价映射：key 为本地 "provider:model" 或裸 "model"，value 为 [models.dev provider, 模型 id] */
@@ -109,10 +131,16 @@ interface StatusbarConfig {
 	 *  默认隐藏 pi-lens 的 "LSP Inactive"（未编辑代码时的被动状态），保留 LSP Active / Failed 等有信息量的状态。
 	 */
 	hideExtStatuses: string[];
-	/** 布局模式，默认 auto：终端 ≥120 列时右侧面板，否则底部单行 */
+	/** 布局模式，默认 auto（终端 ≥120 列时右侧面板，否则底部单行）；见 LayoutMode */
 	layout: LayoutMode;
 	/** 右侧面板宽度（列），默认 32，读取时 clamp 到 [20, 60] */
 	rightWidth: number;
+	/** 开启 layout=split 时自动改写 pi settings.json 的 tuiMode，这里记录改前的值以便切回时还原。
+	 *  缺省 = 从未改过；"none" = 原本没有该字段（切回时删除）；"regular"/"fullscreen" = 原值 */
+	tuiModeBackup?: string;
+	/** 面板边框字符集，默认 unicode（方框绘制字符）；ascii 用于绕开个别终端对
+	 *  U+2500 段「自绘字形」重绘不彻底造成的边框错位残影 */
+	panelBorder: PanelBorder;
 	/** 隐藏的指标 key 列表（默认全部显示），/statusbar metrics 交互式配置 */
 	hiddenMetrics: MetricKey[];
 	/** 配置面板显示语言，默认 zh；/statusbar 菜单语言行 ←→ 切换（即时写回配置文件） */
@@ -121,6 +149,12 @@ interface StatusbarConfig {
 
 /** 配置面板语言 */
 type Lang = "zh" | "en";
+
+/** 面板边框字符集：
+ *  auto（默认）= 按终端自动判定（见 resolvePanelBorder）；unicode = ┌─┐│└┘；ascii = + - | 。
+ *  为什么需要 ascii：部分终端把 U+2500 段方框字符交给独立的「自绘字形」（custom glyphs）
+ *  通道绘制，该层漏重绘时会单独错位（文字行列仍是齐的），换 ascii 后与文字同层可绕开。 */
+type PanelBorder = "auto" | "unicode" | "ascii";
 
 /** 可配置显隐的指标 */
 type MetricKey =
@@ -150,10 +184,10 @@ const METRICS: { key: MetricKey; zh: string; en: string }[] = [
 	{ key: "ext", zh: "其他扩展状态", en: "Extension statuses" },
 ];
 
-const LAYOUT_ORDER: LayoutMode[] = ["bottom", "right", "auto"];
+const LAYOUT_ORDER: LayoutMode[] = ["auto", "bottom", "right", "split"];
 const LAYOUT_LABELS: Record<Lang, Record<LayoutMode, string>> = {
-	zh: { bottom: "底部单行", right: "右侧面板", auto: "自动" },
-	en: { bottom: "Bottom", right: "Right panel", auto: "Auto" },
+	zh: { auto: "自动", bottom: "底部单行", right: "右侧面板", split: "真分栏" },
+	en: { auto: "Auto", bottom: "Bottom", right: "Right panel", split: "Split" },
 };
 const LANG_LABELS: Record<Lang, string> = { zh: "中文", en: "English" };
 
@@ -162,6 +196,7 @@ const UI_TEXT = {
 	zh: {
 		menuTitle: "状态栏设置",
 		rowLayout: "布局",
+		rowBorder: "面板边框",
 		rowLang: "语言",
 		rowMetrics: "指标显隐",
 		rowDisable: "停用自定义状态栏",
@@ -175,10 +210,21 @@ const UI_TEXT = {
 		saveFailed: (e: unknown) => `写入配置文件失败: ${e}`,
 		canceled: "已取消，配置未保存",
 		noTui: "当前模式不支持交互式配置，请直接改配置文件",
+		splitNeedFullscreen: "需重启生效",
+		splitEnabled: "真分栏已开启",
+		splitDisabled: "真分栏已关闭",
+		splitNeedsRestart:
+			"已自动把 pi 的 TUI mode 设为 fullscreen：重启 pi 后生效（当前会话仍是 regular，已退回底部单行）",
+		splitRestored: "真分栏已关闭，pi 的 TUI mode 已还原",
+		splitSetFailed:
+			"自动写入 pi settings.json 失败，请手动在 /settings → TUI mode 里切到 fullscreen",
+		splitUnavailable:
+			"分栏需要 fullscreen 模式（/settings → TUI mode）与支持 HStack 的 pi-tui",
 	},
 	en: {
 		menuTitle: "Statusbar Settings",
 		rowLayout: "Layout",
+		rowBorder: "Panel border",
 		rowLang: "Language",
 		rowMetrics: "Metrics",
 		rowDisable: "Disable custom statusbar",
@@ -192,6 +238,16 @@ const UI_TEXT = {
 		saveFailed: (e: unknown) => `Failed to write config: ${e}`,
 		canceled: "Cancelled, not saved",
 		noTui: "Interactive config requires TUI mode; edit the config file instead",
+		splitNeedFullscreen: "restart to apply",
+		splitEnabled: "Split panel enabled",
+		splitDisabled: "Split panel disabled",
+		splitNeedsRestart:
+			"Set pi TUI mode to fullscreen for you: restart pi to apply (this session stays regular, using the bottom line)",
+		splitRestored: "Split panel disabled; pi TUI mode restored",
+		splitSetFailed:
+			"Could not write pi settings.json; switch manually via /settings → TUI mode → fullscreen",
+		splitUnavailable:
+			"Split panel needs fullscreen mode (/settings → TUI mode) and a pi-tui build that exports HStack",
 	},
 } as const;
 
@@ -211,11 +267,22 @@ const CONFIG_FILE =
 const DEFAULT_HIDE_EXT_STATUSES = ["LSP Inactive"];
 const DEFAULT_LAYOUT: LayoutMode = "auto";
 const DEFAULT_RIGHT_WIDTH = 32;
+const DEFAULT_PANEL_BORDER: PanelBorder = "auto";
+/** 面板边框字符表（h 横线 / v 竖线 / 四角） */
+const BORDER_CHARS: Record<
+	PanelBorder,
+	{ h: string; v: string; tl: string; tr: string; bl: string; br: string }
+> = {
+	unicode: { h: "─", v: "│", tl: "┌", tr: "┐", bl: "└", br: "┘" },
+	ascii: { h: "-", v: "|", tl: "+", tr: "+", bl: "+", br: "+" },
+};
 /** auto 模式阈值：终端列数 ≥ 该值时使用右侧面板 */
 const AUTO_MIN_WIDTH = 120;
 
-function toLayoutMode(v: unknown): LayoutMode {
-	return v === "bottom" || v === "right" || v === "auto" ? v : DEFAULT_LAYOUT;
+function toLayoutMode(v: unknown, legacySplit = false): LayoutMode {
+	if (v === "bottom" || v === "right" || v === "auto" || v === "split") return v;
+	// 旧配置的 split: true 迁移为 layout: "split"
+	return legacySplit ? "split" : DEFAULT_LAYOUT;
 }
 
 function toRightWidth(v: unknown): number {
@@ -225,6 +292,42 @@ function toRightWidth(v: unknown): number {
 
 function toLang(v: unknown): Lang {
 	return v === "en" ? "en" : "zh";
+}
+
+function toPanelBorder(v: unknown): PanelBorder {
+	if (v === "unicode" || v === "ascii") return v;
+	return DEFAULT_PANEL_BORDER;
+}
+
+/**
+ * auto 模式下的边框字符集判定。
+ * 终端不提供可查询的像素/重绘能力，这里只能用环境变量做启发式：
+ *  - PI_STATUSBAR_BORDER=unicode|ascii  手动覆盖（最高优先级）
+ *  - TERM_PROGRAM=vscode（VSCode / Cursor / 同系 fork 的内置终端）用 ascii：
+ *    这类 Electron + xterm.js 终端带「自绘字形」通道，实测会对 U+2500 段方框字符
+ *    漏重绘、留下只有边框错位的残影；换字体字形绘制即可绕开
+ *  - 其它终端用 unicode（方框线连续、更好看）
+ */
+function resolvePanelBorder(setting: PanelBorder): "unicode" | "ascii" {
+	if (setting !== "auto") return setting;
+	const env = process.env.PI_STATUSBAR_BORDER;
+	if (env === "unicode" || env === "ascii") return env;
+	return process.env.TERM_PROGRAM === "vscode" ? "ascii" : "unicode";
+}
+
+const BORDER_ORDER: PanelBorder[] = ["auto", "unicode", "ascii"];
+
+/** 循环切换：auto → unicode → ascii → auto */
+function nextPanelBorder(cur: PanelBorder): PanelBorder {
+	const i = BORDER_ORDER.indexOf(cur);
+	return BORDER_ORDER[(i + 1) % BORDER_ORDER.length];
+}
+
+/** 菜单/提示用的边框值文案：auto 时同时给出实际生效的字形集 */
+function panelBorderLabel(v: PanelBorder): string {
+	const glyphs =
+		resolvePanelBorder(v) === "ascii" ? "ASCII (+-+)" : "Unicode (┌─┐)";
+	return v === "auto" ? `Auto · ${glyphs}` : glyphs;
 }
 
 /** 去除 jsonc 行注释（保留字符串内的 //，如 URL） */
@@ -247,13 +350,18 @@ function stripJsonComments(s: string): string {
 function loadConfig(): StatusbarConfig {
 	try {
 		const raw = JSON.parse(stripJsonComments(readFileSync(CONFIG_FILE, "utf8")));
+		// 旧版的独立 split 开关：内存里已并进 layout，session_start 时再写回文件把它删掉
+		legacySplitKey = typeof raw?.split === "boolean";
 		return {
 			priceMap: raw?.priceMap ?? {},
 			hideExtStatuses: Array.isArray(raw?.hideExtStatuses)
 				? raw.hideExtStatuses
 				: [...DEFAULT_HIDE_EXT_STATUSES],
-			layout: toLayoutMode(raw?.layout),
+			layout: toLayoutMode(raw?.layout, raw?.split === true),
 			rightWidth: toRightWidth(raw?.rightWidth),
+			panelBorder: toPanelBorder(raw?.panelBorder),
+			tuiModeBackup:
+				typeof raw?.tuiModeBackup === "string" ? raw.tuiModeBackup : undefined,
 			hiddenMetrics: toMetricKeys(raw?.hiddenMetrics),
 			language: toLang(raw?.language),
 		};
@@ -263,6 +371,8 @@ function loadConfig(): StatusbarConfig {
 			hideExtStatuses: [...DEFAULT_HIDE_EXT_STATUSES],
 			layout: DEFAULT_LAYOUT,
 			rightWidth: DEFAULT_RIGHT_WIDTH,
+			panelBorder: DEFAULT_PANEL_BORDER,
+			tuiModeBackup: undefined,
 			hiddenMetrics: [],
 			language: "zh",
 		};
@@ -281,6 +391,8 @@ function saveConfigPatch(patch: Record<string, unknown>): void {
 			hideExtStatuses: config.hideExtStatuses,
 			layout: config.layout,
 			rightWidth: config.rightWidth,
+			panelBorder: config.panelBorder,
+			tuiModeBackup: config.tuiModeBackup,
 			hiddenMetrics: config.hiddenMetrics,
 			language: config.language,
 		};
@@ -290,6 +402,9 @@ function saveConfigPatch(patch: Record<string, unknown>): void {
 }
 
 let config = loadConfig();
+
+/** 配置文件里是否还有旧版的 split 字段（一次性迁移用，见 session_start） */
+let legacySplitKey = false;
 
 /** models.dev 模型单价 → 本地 ModelCost 结构 */
 function toModelCost(c: any): ModelCost {
@@ -1094,24 +1209,39 @@ export default function (pi: ExtensionAPI) {
 		return segs.filter((s) => !s.key || !config.hiddenMetrics.includes(s.key));
 	}
 
-	/** 右侧悬浮信息面板：非捕获浮层，纯展示，竖排 label/value 行 + 边框 */
+	/** 右侧信息面板：竖排 label/value 行 + 边框。
+	 *  overlay 模式下（无 heightOf）高度贴合内容；
+	 *  真分栏模式下传入 heightOf，把卡片铺满整个视口高度，避免右侧留下一条空白列。 */
 	const PANEL_LABEL_W = 7;
 	class StatusPanel implements Component {
-		constructor(private theme: Theme) {}
+		constructor(
+			private theme: Theme,
+			private heightOf?: () => number,
+		) {}
 		invalidate(): void {}
 		render(width: number): string[] {
+			// 渲染期异常绝不允许冒泡：pi 会把它当 uncaughtException 直接退出进程。
+			// 旧实例的组件在 /reload 后可能仍挂在布局树上（currentCtx 已失效）。
+			try {
+				return this.renderPanel(width);
+			} catch {
+				return [];
+			}
+		}
+		private renderPanel(width: number): string[] {
 			const ctx = currentCtx;
 			const fd = activeFooterData;
 			if (!ctx || !fd) return [];
 			const th = this.theme;
 			const innerW = Math.max(PANEL_LABEL_W + 4, width - 2);
+			const g = BORDER_CHARS[resolvePanelBorder(config.panelBorder)];
 			const border = (l: string, r: string) =>
-				th.fg("dim", l + "─".repeat(innerW) + r);
-			const lines: string[] = [border("┌", "┐")];
+				th.fg("dim", l + g.h.repeat(innerW) + r);
+			const body: string[] = [];
 			const row = (content: string) => {
 				const padded =
 					content + " ".repeat(Math.max(0, innerW - visibleWidth(content)));
-				return th.fg("dim", "│") + padded + th.fg("dim", "│");
+				body.push(th.fg("dim", g.v) + padded + th.fg("dim", g.v));
 			};
 			for (const s of buildSegments(ctx, th, fd, "panel")) {
 				if (s.label) {
@@ -1122,16 +1252,18 @@ export default function (pi: ExtensionAPI) {
 							i === 0
 								? th.fg("dim", s.label.padEnd(PANEL_LABEL_W))
 								: " ".repeat(PANEL_LABEL_W);
-						lines.push(row(" " + labelCol + " " + line));
+						row(" " + labelCol + " " + line);
 					});
 				} else {
 					for (const line of wrapTextWithAnsi(s.text, innerW - 2)) {
-						lines.push(row(" " + line));
+						row(" " + line);
 					}
 				}
 			}
-			lines.push(border("└", "┘"));
-			return lines;
+			// 分栏模式：补满到视口高度（上下边框各占 1 行），超出部分由布局层裁切
+			const target = this.heightOf ? Math.max(1, this.heightOf() - 2) : 0;
+			while (target > 0 && body.length < target) row("");
+			return [border(g.tl, g.tr), ...body, border(g.bl, g.br)];
 		}
 	}
 
@@ -1162,7 +1294,10 @@ export default function (pi: ExtensionAPI) {
 								anchor: "right-center",
 								width: config.rightWidth,
 								maxHeight: "80%",
-								margin: { right: 1 },
+								// right:0：与真分栏面板同一列。浮层是 right:1（面板左移一格），
+								// 切换 split 开关时面板会左右跳一格，终端只会重绘变化过的行，
+								// 于是留下半旧半新的错位残影（用户反馈的“不对齐”）
+								margin: { right: 0 },
 								nonCapturing: true,
 								visible: (w: number) => userWants && panelAlive && panelActive(w),
 							}),
@@ -1190,6 +1325,148 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	// ---------- 真分栏（split）：仅 fullscreen/alt-screen 模式具备布局树 ----------
+
+	/** 我们安装的 HStack（幂等判据 + 卸载依据）；splitCore 是它包住的核心布局根（transcript + dock） */
+	let splitWrapper: Component | null = null;
+	let splitCore: Component | null = null;
+	let splitBasis = 0;
+	let splitPending = false;
+	let splitPanel: StatusPanel | null = null;
+	let splitPanelTheme: Theme | null = null;
+	/** visible 回调每帧记录整个视口宽度：分栏下 footer 收到的宽度已扣掉侧栏，不能再当归属判据 */
+	let splitViewportW = 0;
+
+	/**
+	 * 访问 pi-tui alt-screen renderer 的布局根。
+	 * SAFETY: pi-tui 只公开了 `ViewportTUI.setLayoutRoot()`，真正的读写目标是 TS 里标为 private 的
+	 * `layoutRoot` 字段；调用方必须先过 splitCapable()（已确认 mode==="fullscreen" 且 setLayoutRoot 可调用）。
+	 * 另外扩展拿到的 `tui` 是 pi 的 live proxy，每次读属性都会转发到当前 renderer，切模式后依然有效。
+	 */
+	interface LayoutRootHost {
+		layoutRoot?: Component;
+		setLayoutRoot(root: Component | undefined): void;
+	}
+	function asLayoutRootHost(tui: TUI): LayoutRootHost {
+		// SAFETY: 仅当 splitCapable() 通过（mode==="fullscreen" 且 setLayoutRoot 可调用）时才会调用本函数；
+		// 断言的对象是 pi 的 live TUI proxy，属性读取会转发到当前 alt-screen renderer。
+		return tui as unknown as LayoutRootHost;
+	}
+
+	/** pi-tui 是否提供 HStack（旧版本没有；命名导入会在链接期直接抛错，所以用命名空间导入 + 一次性特性检测） */
+	const HAS_PI_TUI_HSTACK = typeof piTuiRuntime.HStack === "function";
+
+	/** 当前 TUI 是否具备真分栏能力：fullscreen 布局树 + pi-tui 提供 HStack */
+	function splitCapable(tui: TUI | null): boolean {
+		if (!tui || tui.mode !== "fullscreen") return false;
+		if (!HAS_PI_TUI_HSTACK) return false;
+		const t = asLayoutRootHost(tui);
+		return typeof t.setLayoutRoot === "function" && "layoutRoot" in tui;
+	}
+
+	/** 分栏可用宽度下限：内容区至少留 24 列（layout=right 在极窄终端下不把聊天压成一条） */
+	function splitWidthOk(width: number): boolean {
+		return width >= config.rightWidth + 24;
+	}
+
+	/** 分栏是否已装在当前 renderer 上（核心切模式时会重设 layoutRoot，需要重包） */
+	function splitInstalled(tui: TUI): boolean {
+		if (!splitWrapper) return false;
+		return asLayoutRootHost(tui).layoutRoot === splitWrapper;
+	}
+
+	/**
+	 * 安装真分栏：把核心布局根（transcript + dock 的 VStack）包进 HStack，右侧挂状态面板。
+	 * 聊天按剩余宽度重新换行，不遮挡任何内容 —— 与 opencode 的 flexDirection="row" 同构。
+	 * 幂等；微任务延迟，不在 render 周期内同步改写布局树。
+	 */
+	function ensureSplit(tui: TUI, theme: Theme): void {
+		if (layoutMode !== "split" || splitPending || !splitCapable(tui)) return;
+		const t = asLayoutRootHost(tui);
+		const cur = t.layoutRoot;
+		if (!cur) return;
+		if (splitInstalled(tui) && splitBasis === config.rightWidth) return; // 已就绪
+		splitPending = true;
+		queueMicrotask(() => {
+			splitPending = false;
+			if (layoutMode !== "split" || !userWants || !splitCapable(tui)) return;
+			const root = t.layoutRoot;
+			if (!root) return;
+			const basis = config.rightWidth;
+			if (root === splitWrapper && splitBasis === basis) return;
+			// 核心重设过 layoutRoot 时 root 就是新的核心根，否则 root 是我们的 wrapper
+			const core = root === splitWrapper && splitCore ? splitCore : root;
+			try {
+				if (!splitPanel || splitPanelTheme !== theme) {
+					splitPanel = new StatusPanel(theme, () => tui.terminal.rows);
+					splitPanelTheme = theme;
+				}
+				const panel = splitPanel;
+				const wrapper = new piTuiRuntime.HStack(
+					[
+						// basis: 0 + grow: 1 与核心自身的 transcript 写法一致：
+						// 避免布局引擎为测量固有宽度而多渲染一遍整个核心布局（每帧一次全量重排）
+						{ component: core, basis: 0, grow: 1, shrink: 1, minSize: 24 },
+						{
+							component: panel,
+							basis,
+							grow: 0,
+							shrink: 0,
+							visible: (vp: { width: number; height: number }) => {
+								splitViewportW = vp.width;
+								return userWants && splitWidthOk(vp.width);
+							},
+						},
+					],
+					{ gap: 1 },
+				);
+				splitWrapper = wrapper;
+				splitCore = core;
+				splitBasis = basis;
+				t.setLayoutRoot(wrapper);
+				// 布局树变更后强制整屏重绘：否则终端会保留上一帧的残行（面板错位一格）
+				tui.requestRender(true);
+			} catch {
+				// 布局根不可用（pi 升级改了结构 / 缺 HStack）：静默回退浮层或底部单行
+				splitWrapper = null;
+				splitCore = null;
+				splitBasis = 0;
+			}
+		});
+	}
+
+	/** 卸载真分栏，把核心布局根还回去 */
+	function closeSplit(): void {
+		const wrapper = splitWrapper;
+		const core = splitCore;
+		splitWrapper = null;
+		splitCore = null;
+		splitBasis = 0;
+		splitViewportW = 0;
+		if (!wrapper) return;
+		// 只判 mode：这里不需要 HStack（卸载不依赖它），也不能用 splitCapable
+		// 提前返回，否则 wrapper 会永久留在布局树上（reload 后渲染陈旧 ctx → pi 退出）
+		const tui = activeTui;
+		if (!tui || tui.mode !== "fullscreen") return;
+		const t = asLayoutRootHost(tui);
+		try {
+			if (t.layoutRoot === wrapper) {
+				t.setLayoutRoot(core ?? undefined);
+				// 卸掉分栏同样会改变面板列位置：微任务里强制整屏重绘，清掉旧列残影。
+				// 不能同步调（closeSplit 可能从 render 里调用，重绘会打断当前渲染）
+				queueMicrotask(() => {
+					try {
+						tui.requestRender(true);
+					} catch {
+						// TUI 已销毁，忽略
+					}
+				});
+			}
+		} catch {
+			// TUI 已销毁或核心已接管布局根，忽略
+		}
+	}
+
 	// ---------- footer ----------
 
 	function enable(ctx: ExtensionContext): void {
@@ -1211,8 +1488,20 @@ export default function (pi: ExtensionAPI) {
 				render(width: number): string[] {
 					const ctx = currentCtx;
 					if (!ctx) return [];
+					// 配置热更新/菜单关闭分栏后的兜底卸载
+					if (splitWrapper && layoutMode !== "split") closeSplit();
 					// 宽终端（或强制 right）时由右侧面板接管，底部让位；面板未就绪时仍渲染底部兜底
-					if (panelActive(width)) {
+					if (layoutMode === "split") {
+						// 分栏下 footer 收到的宽度已被侧栏扣掉，归属判定必须用整个视口宽度。
+						// layout=split 是显式选择：只要装得下（≥ rightWidth+24）就分栏，不再叠一层 auto 的 120 列阈值
+						const panelW = splitViewportW || tui.terminal.columns;
+						if (splitWidthOk(panelW)) {
+							ensureSplit(tui, theme);
+							// 仅在 wrapper 真的装在当前 renderer 上时才让位（核心重设 layoutRoot 的那一帧继续渲染底部）
+							if (splitInstalled(tui)) return [];
+						}
+						// 分栏不可用（regular 模式 / 极窄 / 缺 HStack）：继续渲染底部单行
+					} else if (panelActive(width)) {
 						ensurePanel(ctx);
 						if (panelAlive || panelPending) return [];
 					}
@@ -1257,6 +1546,7 @@ export default function (pi: ExtensionAPI) {
 	function disable(ctx: ExtensionContext): void {
 		userWants = false;
 		closePanel();
+		closeSplit();
 		if (!ctx.hasUI) return;
 		ctx.ui.setFooter(undefined);
 	}
@@ -1302,18 +1592,20 @@ export default function (pi: ExtensionAPI) {
 		private sel = 0;
 		private cachedW?: number;
 		private cachedLines?: string[];
-		private static readonly ROWS = 4;
+		private static readonly ROWS = 5;
 
 		constructor(
 			private theme: Theme,
 			private close: (action: MenuAction | null) => void,
+			private notify: (msg: string, type: "info" | "warning") => void = () => {},
 		) {}
 
 		private cycleLayout(dir: 1 | -1): void {
 			const i = LAYOUT_ORDER.indexOf(layoutMode);
-			layoutMode =
-				LAYOUT_ORDER[(i + dir + LAYOUT_ORDER.length) % LAYOUT_ORDER.length];
-			if (userWants) activeTui?.requestRender();
+			setLayout(
+				LAYOUT_ORDER[(i + dir + LAYOUT_ORDER.length) % LAYOUT_ORDER.length],
+				this.notify,
+			);
 			this.invalidate();
 		}
 
@@ -1325,6 +1617,12 @@ export default function (pi: ExtensionAPI) {
 			} catch {
 				// 写入失败不影响本次会话内的显示
 			}
+			this.invalidate();
+		}
+
+		/** 切换面板边框字符集：auto → unicode → ascii 循环（与 /statusbar border 共用） */
+		private cycleBorder(): void {
+			setPanelBorder(nextPanelBorder(config.panelBorder));
 			this.invalidate();
 		}
 
@@ -1348,16 +1646,18 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (matchesKey(data, "left")) {
 				if (this.sel === 0) return this.cycleLayout(-1);
-				if (this.sel === 1) return this.cycleLang();
+				if (this.sel === 1) return this.cycleBorder();
+				if (this.sel === 2) return this.cycleLang();
 			}
 			if (matchesKey(data, "right")) {
 				if (this.sel === 0) return this.cycleLayout(1);
-				if (this.sel === 1) return this.cycleLang();
+				if (this.sel === 1) return this.cycleBorder();
+				if (this.sel === 2) return this.cycleLang();
 			}
 			if (matchesKey(data, "return")) {
-				if (this.sel === 2) return this.close("metrics");
-				if (this.sel === 3) return this.close("toggle");
-				return this.close(null); // 布局/语言行：已实时生效，Enter 即完成退出
+				if (this.sel === 3) return this.close("metrics");
+				if (this.sel === 4) return this.close("toggle");
+				return this.close(null); // 布局/边框/语言行：已实时生效，Enter 即完成退出
 			}
 		}
 
@@ -1368,6 +1668,7 @@ export default function (pi: ExtensionAPI) {
 			const lines: string[] = ["", menuHeader(th, T.menuTitle, width), ""];
 			const labels = [
 				T.rowLayout,
+				T.rowBorder,
 				T.rowLang,
 				T.rowMetrics,
 				userWants ? T.rowDisable : T.rowEnable,
@@ -1379,35 +1680,50 @@ export default function (pi: ExtensionAPI) {
 				on
 					? `${th.fg("accent", "◀")} ${th.fg("accent", text)} ${th.fg("accent", "▶")}`
 					: `${th.fg("dim", "◀")} ${th.fg("muted", text)} ${th.fg("dim", "▶")}`;
-			// 行 0：布局
+			// 行 0：布局（auto / bottom / right / split；进出 split 会同步 pi 的 tuiMode 并写回配置）
+			const layoutValue =
+				layoutMode === "split" && !splitCapable(activeTui)
+					? `${LAYOUT_LABELS[config.language].split} · ${T.splitNeedFullscreen}`
+					: LAYOUT_LABELS[config.language][layoutMode];
 			lines.push(
 				menuRow(
 					th,
 					this.sel === 0,
 					labels[0],
-					adjustable(this.sel === 0, LAYOUT_LABELS[config.language][layoutMode]),
+					adjustable(this.sel === 0, layoutValue),
 					labelCol,
 					width,
 				),
 			);
-			// 行 1：语言
+			// 行 1：面板边框字符集（值显示实际生效的字形集）
 			lines.push(
 				menuRow(
 					th,
 					this.sel === 1,
 					labels[1],
-					adjustable(this.sel === 1, LANG_LABELS[config.language]),
+					adjustable(this.sel === 1, panelBorderLabel(config.panelBorder)),
 					labelCol,
 					width,
 				),
 			);
-			// 行 2：指标显隐（显示计数）
-			const hiddenCount = config.hiddenMetrics.length;
+			// 行 2：语言
 			lines.push(
 				menuRow(
 					th,
 					this.sel === 2,
 					labels[2],
+					adjustable(this.sel === 2, LANG_LABELS[config.language]),
+					labelCol,
+					width,
+				),
+			);
+			// 行 3：指标显隐（显示计数）
+			const hiddenCount = config.hiddenMetrics.length;
+			lines.push(
+				menuRow(
+					th,
+					this.sel === 3,
+					labels[3],
 					th.fg(
 						hiddenCount ? "warning" : "muted",
 						T.metricsCount(METRICS.length - hiddenCount, METRICS.length),
@@ -1416,8 +1732,8 @@ export default function (pi: ExtensionAPI) {
 					width,
 				),
 			);
-			// 行 3：启用/停用
-			lines.push(menuRow(th, this.sel === 3, labels[3], "", labelCol, width));
+			// 行 4：启用/停用
+			lines.push(menuRow(th, this.sel === 4, labels[4], "", labelCol, width));
 			lines.push("");
 			lines.push(truncateToWidth(`  ${th.fg("dim", T.menuHint)}`, width));
 			lines.push("");
@@ -1512,26 +1828,197 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	/** 应用布局模式并提示（不写回配置文件；省略 mode 时循环切换 bottom→right→auto） */
+	/** /statusbar layout 子命令入口：省略 mode 时按 LAYOUT_ORDER 循环 */
 	function applyLayout(ctx: ExtensionContext, mode?: LayoutMode): void {
+		const notify = (msg: string, type: "info" | "warning") =>
+			ctx.ui.notify(msg, type);
 		if (mode) {
-			layoutMode = mode;
-		} else {
-			const NEXT: Record<LayoutMode, LayoutMode> = {
-				bottom: "right",
-				right: "auto",
-				auto: "bottom",
-			};
-			layoutMode = NEXT[layoutMode];
+			setLayout(mode, notify);
+			return;
 		}
-		// 切到 bottom 时面板由 visible 回调自动隐藏；切到 right/auto 时若面板未创建由 footer 下一帧触发
-		if (userWants) activeTui?.requestRender();
-		ctx.ui.notify(
-			layoutMode === "auto"
-				? `状态栏布局: auto（终端 ≥${AUTO_MIN_WIDTH} 列时右侧面板，否则底部单行）`
-				: `状态栏布局: ${layoutMode}`,
+		const i = LAYOUT_ORDER.indexOf(layoutMode);
+		setLayout(LAYOUT_ORDER[(i + 1) % LAYOUT_ORDER.length], notify);
+	}
+
+	/**
+	 * 开关真分栏并提示（写回配置文件，与 language 一样持久化）。
+	 * 需 fullscreen 模式才真正生效；regular 模式/缺 HStack 时退回底部单行（不建浮层）。
+	 */
+	/** pi 全局设置文件路径（split 自动同步 TUI mode 用；尊重 PI_CODING_AGENT_DIR） */
+	function piSettingsPath(): string {
+		const fn = (piAgentRuntime as { getSettingsPath?: () => string })
+			.getSettingsPath;
+		if (typeof fn === "function") return fn.call(piAgentRuntime);
+		const envDir = process.env.PI_CODING_AGENT_DIR;
+		const dir = envDir
+			? envDir.replace(/^~(?=\/|$)/, homedir())
+			: join(homedir(), ".pi", "agent");
+		return join(dir, "settings.json");
+	}
+
+	interface TuiModeSync {
+		/** 是否真的写入了 pi settings.json */
+		wrote: boolean;
+		/** 当前会话仍不是 fullscreen，需要重启 pi 才生效 */
+		needsRestart: boolean;
+		failed: boolean;
+	}
+
+	/**
+	 * 开启真分栏时自动把 pi 的 tuiMode 设为 fullscreen（避免用户要改两处配置），关闭时还原。
+	 * 安全性：pi 自己的 settings 保存只合并「已修改字段」（settings-manager.persistScopedSettings
+	 * 先读文件再合并），所以这里的外部写入不会被 pi 后续保存抹掉。
+	 */
+	function syncPiTuiMode(on: boolean): TuiModeSync {
+		const none: TuiModeSync = {
+			wrote: false,
+			needsRestart: false,
+			failed: false,
+		};
+		try {
+			const file = piSettingsPath();
+			const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
+			if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+				return { ...none, failed: true };
+			const settings = parsed as Record<string, unknown>;
+			const current = typeof settings.tuiMode === "string" ? settings.tuiMode : "";
+
+			if (on) {
+				if (current === "fullscreen") return none;
+				if (config.tuiModeBackup === undefined) {
+					config.tuiModeBackup = current === "" ? "none" : current;
+					saveConfigPatch({ tuiModeBackup: config.tuiModeBackup });
+				}
+				settings.tuiMode = "fullscreen";
+				writeFileSync(file, JSON.stringify(settings, null, 2) + "\n");
+				return {
+					wrote: true,
+					needsRestart: !splitCapable(activeTui),
+					failed: false,
+				};
+			}
+
+			// 关闭：只有确实由我们改过（有备份）才还原
+			if (config.tuiModeBackup === undefined) return none;
+			if (config.tuiModeBackup === "none") delete settings.tuiMode;
+			else settings.tuiMode = config.tuiModeBackup;
+			config.tuiModeBackup = undefined;
+			saveConfigPatch({ tuiModeBackup: config.tuiModeBackup });
+			writeFileSync(file, JSON.stringify(settings, null, 2) + "\n");
+			return { wrote: true, needsRestart: false, failed: false };
+		} catch {
+			return { ...none, failed: true };
+		}
+	}
+
+	/**
+	 * 统一的 split 开关：写 statusbar.json + 自动同步 pi 的 TUI mode + 报结果。
+	 * /statusbar split 子命令与交互式菜单共用，保证两条路径行为一致。
+	 */
+	function setLayout(
+		next: LayoutMode,
+		notify?: (msg: string, type: "info" | "warning") => void,
+	): void {
+		const T = t();
+		const prev = layoutMode;
+		if (prev === next) return;
+		layoutMode = next;
+		config.layout = next;
+		try {
+			// split 是旧的独立开关：写回时顺手置 undefined 删掉，避免两份配置打架
+			saveConfigPatch({ layout: next, split: undefined });
+		} catch {
+			// 写入失败不影响本次会话内的显示
+		}
+		// 进分栏：先卸掉旧的右侧浮层（浮层不认分栏，留着会和分栏面板叠在一起）
+		// 出分栏：卸掉分栏，下一帧 footer 渲染时自动回退到浮层/底部单行
+		if (next === "split") closePanel();
+		else if (prev === "split") closeSplit();
+		// 右侧面板的位置/高度变了：强制整屏重绘，避免残影
+		if (userWants) activeTui?.requestRender(true);
+
+		if (next !== "split" && prev !== "split") {
+			if (!notify) return;
+			notify(
+				next === "auto"
+					? `状态栏布局: auto（终端 ≥${AUTO_MIN_WIDTH} 列时右侧面板，否则底部单行）`
+					: `状态栏布局: ${LAYOUT_LABELS[config.language][next]}`,
+				"info",
+			);
+			return;
+		}
+
+		const sync = syncPiTuiMode(next === "split");
+		if (next !== "split") {
+			notify?.(
+				sync.failed
+					? T.splitSetFailed
+					: sync.wrote
+						? T.splitRestored
+						: T.splitDisabled,
+				sync.failed ? "warning" : "info",
+			);
+			return;
+		}
+		if (!HAS_PI_TUI_HSTACK) {
+			notify?.(T.splitUnavailable, "warning");
+			return;
+		}
+		if (splitCapable(activeTui)) {
+			notify?.(T.splitEnabled, "info");
+			return;
+		}
+		// 当前会话不是 fullscreen：配置已写好，重启 pi 后生效
+		notify?.(
+			sync.failed ? T.splitSetFailed : T.splitNeedsRestart,
+			sync.failed ? "warning" : "info",
+		);
+	}
+
+	/** /statusbar split on|off 兼容别名：on = layout split，off = 回到默认布局 */
+	function applySplit(ctx: ExtensionContext, on: boolean): void {
+		setLayout(on ? "split" : DEFAULT_LAYOUT, (msg, type) =>
+			ctx.ui.notify(msg, type),
+		);
+	}
+
+	/**
+	 * 切换面板边框字符集（写回配置文件，立即生效）。
+	 * 换字符会改掉整块边框：强制整屏重绘，避开个别终端对旧方框字符的残影。
+	 */
+	function setPanelBorder(
+		next: PanelBorder,
+		notify?: (msg: string, type: "info" | "warning") => void,
+	): void {
+		if (config.panelBorder === next) {
+			notify?.(`面板边框已是 ${panelBorderLabel(next)}`, "info");
+			return;
+		}
+		config.panelBorder = next;
+		try {
+			saveConfigPatch({ panelBorder: next });
+		} catch {
+			// 写入失败不影响本次会话内的显示
+		}
+		activeTui?.requestRender(true);
+		notify?.(
+			`面板边框: ${panelBorderLabel(next)}` +
+				(resolvePanelBorder(next) === "ascii"
+					? "（与文字同层，可绕开方框字符残影）"
+					: ""),
 			"info",
 		);
+	}
+
+	/** /statusbar border 子命令入口（无参数 = 按 auto → unicode → ascii 循环） */
+	function applyPanelBorder(
+		ctx: ExtensionContext,
+		arg: string | undefined,
+	): void {
+		let next: PanelBorder;
+		if (arg === "auto" || arg === "unicode" || arg === "ascii") next = arg;
+		else next = nextPanelBorder(config.panelBorder);
+		setPanelBorder(next, (msg, type) => ctx.ui.notify(msg, type));
 	}
 
 	/** 切换自定义状态栏 / 内置 footer */
@@ -1605,7 +2092,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("statusbar", {
 		description:
-			"状态栏设置：无参数打开交互菜单；子命令 on/off | layout [right|bottom|auto] | metrics | quota | prices",
+			"状态栏设置：无参数打开交互菜单；子命令 on/off | layout [right|bottom|auto|split] | split [on|off] | border [auto|unicode|ascii] | metrics | quota | prices",
 		handler: async (args, ctx) => {
 			const parts = args.trim().toLowerCase().split(/\s+/).filter(Boolean);
 			const sub = parts[0];
@@ -1622,11 +2109,32 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (sub === "layout") {
 				const a = parts[1];
-				if (a && a !== "right" && a !== "bottom" && a !== "auto") {
-					ctx.ui.notify(`无效布局: ${a}（可选 right / bottom / auto）`, "warning");
+				if (a && a !== "right" && a !== "bottom" && a !== "auto" && a !== "split") {
+					ctx.ui.notify(
+						`无效布局: ${a}（可选 right / bottom / auto / split）`,
+						"warning",
+					);
 					return;
 				}
 				applyLayout(ctx, a as LayoutMode | undefined);
+				return;
+			}
+			if (sub === "split") {
+				const a = parts[1];
+				if (a && a !== "on" && a !== "off") {
+					ctx.ui.notify(`无效参数: ${a}（可选 on / off）`, "warning");
+					return;
+				}
+				applySplit(ctx, a ? a === "on" : layoutMode !== "split");
+				return;
+			}
+			if (sub === "border") {
+				const a = parts[1];
+				if (a && a !== "auto" && a !== "unicode" && a !== "ascii") {
+					ctx.ui.notify(`无效参数: ${a}（可选 auto / unicode / ascii）`, "warning");
+					return;
+				}
+				applyPanelBorder(ctx, a);
 				return;
 			}
 			if (sub === "metrics") {
@@ -1643,7 +2151,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (sub) {
 				ctx.ui.notify(
-					`未知子命令: ${sub}。用法: /statusbar [on|off|layout [right|bottom|auto]|metrics|quota|prices]，或无参数打开交互菜单`,
+					`未知子命令: ${sub}。用法: /statusbar [on|off|layout [right|bottom|auto|split]|split [on|off]|border [auto|unicode|ascii]|metrics|quota|prices]，或无参数打开交互菜单`,
 					"warning",
 				);
 				return;
@@ -1656,7 +2164,10 @@ export default function (pi: ExtensionAPI) {
 			}
 			for (;;) {
 				const action = await ctx.ui.custom<MenuAction | null>(
-					(_tui, theme, _kb, done) => new StatusbarMenuComponent(theme, done),
+					(_tui, theme, _kb, done) =>
+						new StatusbarMenuComponent(theme, done, (msg, type) =>
+							ctx.ui.notify(msg, type),
+						),
 				);
 				if (action == null) return;
 				if (action === "metrics") {
@@ -1687,10 +2198,37 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	// 会话被替换/重载/退出前：卸掉真分栏并清空缓存引用。
+	// 关键：真分栏挂在 pi 的布局树上，不随 reload 一起销毁；旧实例的 StatusPanel
+	// 若留着，reload 后仍会渲染并读陈旧 ctx —— pi 的陈旧 ctx 守卫会抛错，
+	// 而布局渲染异常 = uncaughtException，pi 直接退出。
+	pi.on("session_shutdown", async () => {
+		closeSplit();
+		closePanel();
+		currentCtx = null;
+		activeFooterData = null;
+		activeTui = null;
+	});
+
 	// 新会话/续接时按用户偏好恢复，并后台刷新一次实时单价
 	pi.on("session_start", async (_event, ctx) => {
 		config = loadConfig(); // 新会话重读配置，改配置文件无需重启
 		layoutMode = config.layout;
+		// 旧配置一次性迁移：split: true 已并进 layout，顺手把过时字段从文件里删掉
+		if (legacySplitKey) {
+			try {
+				saveConfigPatch({ layout: config.layout, split: undefined });
+				legacySplitKey = false;
+			} catch {
+				// 写失败不影响使用，下次会话再试
+			}
+		}
+		// 真分栏需要 fullscreen：自动补齐 pi 的 TUI mode，用户只需配 layout 一处；写成功才提示（避免每次 /new 都刷）
+		if (layoutMode === "split" && HAS_PI_TUI_HSTACK && !splitCapable(activeTui)) {
+			const sync = syncPiTuiMode(true);
+			if (sync.wrote) ctx.ui.notify(t().splitNeedsRestart, "info");
+			else if (sync.failed) ctx.ui.notify(t().splitSetFailed, "warning");
+		}
 		if (userWants) enable(ctx);
 		updateTitle(ctx);
 		void refreshPrices(ctx, false);
