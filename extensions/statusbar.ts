@@ -138,7 +138,11 @@ const METRICS: { key: MetricKey; zh: string; en: string }[] = [
 	{ key: "branch", zh: "分支 / 目录", en: "Branch / Dir" },
 	{ key: "ctx", zh: "上下文占用", en: "Context usage" },
 	{ key: "model", zh: "模型名", en: "Model" },
-	{ key: "effort", zh: "思考强度 effort（仅右侧面板）", en: "Effort (right panel only)" },
+	{
+		key: "effort",
+		zh: "思考强度 effort（仅右侧面板）",
+		en: "Effort (right panel only)",
+	},
 	{ key: "usage", zh: "token 用量 / 缓存 / 花费", en: "Tokens / cache / cost" },
 	{ key: "ttft", zh: "首 token 耗时 TTFT", en: "TTFT" },
 	{ key: "speed", zh: "输出吞吐 tok/s", en: "Speed tok/s" },
@@ -232,8 +236,7 @@ function stripJsonComments(s: string): string {
 			for (let i = 0; i < line.length; i++) {
 				const c = line[i];
 				if (c === '"' && line[i - 1] !== "\\") inStr = !inStr;
-				if (!inStr && c === "/" && line[i + 1] === "/")
-					return line.slice(0, i);
+				if (!inStr && c === "/" && line[i + 1] === "/") return line.slice(0, i);
 			}
 			return line;
 		})
@@ -888,7 +891,12 @@ export default function (pi: ExtensionAPI) {
 		// git 分支；非 git 目录（如多仓工作区根）时回退显示当前目录名
 		const branch = footerData.getGitBranch();
 		if (branch) {
-			segs.push({ label: "Branch", text: theme.fg("accent", branch), pri: 0, key: "branch" });
+			segs.push({
+				label: "Branch",
+				text: theme.fg("accent", branch),
+				pri: 0,
+				key: "branch",
+			});
 		} else {
 			segs.push({
 				label: "Dir",
@@ -946,7 +954,12 @@ export default function (pi: ExtensionAPI) {
 					});
 			} else {
 				const label = showEffort ? `${ctx.model.id}·${level}` : ctx.model.id;
-				segs.push({ label: "Model", text: theme.fg("muted", label), pri: 1, key: "model" });
+				segs.push({
+					label: "Model",
+					text: theme.fg("muted", label),
+					pri: 1,
+					key: "model",
+				});
 			}
 		}
 
@@ -964,11 +977,31 @@ export default function (pi: ExtensionAPI) {
 		const costText = fmtCost(u.cost);
 		if (variant === "panel") {
 			// 竖排值列较窄，输入/输出/缓存各占一行，避免长值被截断
-			segs.push({ label: "In", text: theme.fg("muted", inText), pri: 2, key: "usage" });
-			segs.push({ label: "Out", text: theme.fg("muted", outText), pri: 2, key: "usage" });
+			segs.push({
+				label: "In",
+				text: theme.fg("muted", inText),
+				pri: 2,
+				key: "usage",
+			});
+			segs.push({
+				label: "Out",
+				text: theme.fg("muted", outText),
+				pri: 2,
+				key: "usage",
+			});
 			if (cacheText)
-				segs.push({ label: "Cache", text: theme.fg("muted", cacheText), pri: 2, key: "usage" });
-			segs.push({ label: "Cost", text: theme.fg("muted", costText), pri: 2, key: "usage" });
+				segs.push({
+					label: "Cache",
+					text: theme.fg("muted", cacheText),
+					pri: 2,
+					key: "usage",
+				});
+			segs.push({
+				label: "Cost",
+				text: theme.fg("muted", costText),
+				pri: 2,
+				key: "usage",
+			});
 		} else {
 			const parts = [inText, outText];
 			if (cacheText) parts.push(cacheText);
@@ -1058,9 +1091,7 @@ export default function (pi: ExtensionAPI) {
 			segs.push({ label: "", text: s, pri: 3, key: "ext" });
 		}
 		// 应用指标显隐配置（/statusbar metrics）
-		return segs.filter(
-			(s) => !s.key || !config.hiddenMetrics.includes(s.key),
-		);
+		return segs.filter((s) => !s.key || !config.hiddenMetrics.includes(s.key));
 	}
 
 	/** 右侧悬浮信息面板：非捕获浮层，纯展示，竖排 label/value 行 + 边框 */
@@ -1088,7 +1119,9 @@ export default function (pi: ExtensionAPI) {
 					const valueLines = wrapTextWithAnsi(s.text, valueW);
 					valueLines.forEach((line, i) => {
 						const labelCol =
-							i === 0 ? th.fg("dim", s.label.padEnd(PANEL_LABEL_W)) : " ".repeat(PANEL_LABEL_W);
+							i === 0
+								? th.fg("dim", s.label.padEnd(PANEL_LABEL_W))
+								: " ".repeat(PANEL_LABEL_W);
 						lines.push(row(" " + labelCol + " " + line));
 					});
 				} else {
@@ -1214,8 +1247,7 @@ export default function (pi: ExtensionAPI) {
 							rowSegs = cand;
 						}
 					}
-					if (rowSegs.length)
-						rows.push(truncateToWidth(join(rowSegs), width));
+					if (rowSegs.length) rows.push(truncateToWidth(join(rowSegs), width));
 					return rows;
 				},
 			};
@@ -1353,10 +1385,7 @@ export default function (pi: ExtensionAPI) {
 					th,
 					this.sel === 0,
 					labels[0],
-					adjustable(
-						this.sel === 0,
-						LAYOUT_LABELS[config.language][layoutMode],
-					),
+					adjustable(this.sel === 0, LAYOUT_LABELS[config.language][layoutMode]),
 					labelCol,
 					width,
 				),
@@ -1390,9 +1419,7 @@ export default function (pi: ExtensionAPI) {
 			// 行 3：启用/停用
 			lines.push(menuRow(th, this.sel === 3, labels[3], "", labelCol, width));
 			lines.push("");
-			lines.push(
-				truncateToWidth(`  ${th.fg("dim", T.menuHint)}`, width),
-			);
+			lines.push(truncateToWidth(`  ${th.fg("dim", T.menuHint)}`, width));
 			lines.push("");
 			this.cachedW = width;
 			this.cachedLines = lines;
@@ -1472,9 +1499,7 @@ export default function (pi: ExtensionAPI) {
 				lines.push(truncateToWidth(`  ${mark} ${icon} ${text}`, width));
 			});
 			lines.push("");
-			lines.push(
-				truncateToWidth(`  ${th.fg("dim", T.pickerHint)}`, width),
-			);
+			lines.push(truncateToWidth(`  ${th.fg("dim", T.pickerHint)}`, width));
 			lines.push("");
 			this.cachedW = width;
 			this.cachedLines = lines;
@@ -1572,9 +1597,7 @@ export default function (pi: ExtensionAPI) {
 		}
 		await Promise.all(bindings.map((b) => refreshQuota(b, ctx, true)));
 		const line = bindings
-			.map(
-				(b) => `${b.source.id}: ${quotaStates.get(b.source.id)?.detail ?? "—"}`,
-			)
+			.map((b) => `${b.source.id}: ${quotaStates.get(b.source.id)?.detail ?? "—"}`)
 			.join("；")
 			.replace(/\n/g, " ");
 		ctx.ui.notify(line, "info");
@@ -1589,20 +1612,18 @@ export default function (pi: ExtensionAPI) {
 
 			// 子命令快捷方式（脚本/RPC 友好，跳过交互菜单）
 			if (sub === "on" || sub === "off") {
-				if ((sub === "on") === userWants) 
+				if ((sub === "on") === userWants)
 					ctx.ui.notify(
 						sub === "on" ? "自定义状态栏已启用" : "已是内置 footer",
 						"info",
-					); else toggleStatusbar(ctx);
+					);
+				else toggleStatusbar(ctx);
 				return;
 			}
 			if (sub === "layout") {
 				const a = parts[1];
 				if (a && a !== "right" && a !== "bottom" && a !== "auto") {
-					ctx.ui.notify(
-						`无效布局: ${a}（可选 right / bottom / auto）`,
-						"warning",
-					);
+					ctx.ui.notify(`无效布局: ${a}（可选 right / bottom / auto）`, "warning");
 					return;
 				}
 				applyLayout(ctx, a as LayoutMode | undefined);
