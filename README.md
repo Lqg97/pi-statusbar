@@ -59,11 +59,13 @@ pi -e git:github.com/Lqg97/pi-statusbar
  "layout": "auto",
  // 右侧面板宽度（列），默认 32，范围 [20, 60]
  "rightWidth": 32,
- // 面板边框字符集："auto"（默认，按终端判定）/ "unicode"（┌─┐│└┘）/ "ascii"（+ - |）。
- // auto 在 TERM_PROGRAM=vscode（VSCode/Cursor 内置终端）时用 ascii：这类终端把 U+2500
- // 段方框字符交给独立的「自绘字形」通道绘制，重绘不彻底时会出现「文字行列是齐的、
- // 只有边框错位」的残影，ascii 与文字同层即可绕开
+ // 面板边框字符集："auto"（默认，只跟随 PI_STATUSBAR_BORDER 环境变量）/ "unicode"（┌─┐│└┘）/ "ascii"（+ - |）。
+ // 注：曾按 TERM_PROGRAM=vscode 自动猜 ascii，实测那类「边框错位」残影来自终端渲染器本身、
+ // 与方框字形无关（ascii 并不能修），已去掉猜测，只留手动切换
  "panelBorder": "auto",
+ // 分栏面板是否把边框铺满整屏高度：true（默认）/ false（高度贴内容）。
+ // 只对 layout=split 有意义（浮层本来就贴合内容）；也可用 /statusbar fill on|off
+ "panelFill": true,
  // 隐藏的指标（可选：branch/ctx/model/effort/usage/ttft/speed/quota/ext），默认全部显示
  // 也可用 /statusbar metrics 交互式配置（会写回此字段）
  "hiddenMetrics": ["ttft"],
@@ -107,11 +109,12 @@ regular 模式下选 `split` 不会报错，而是退回底部单行、且**不�
 
 | 命令 | 说明 |
 | --- | --- |
-| `/statusbar` | 无参数打开交互式菜单：布局（auto/bottom/right/split）/ 面板边框 / 语言（光标在对应行时 ←→ 调值，即时生效并写回配置）/ 指标显隐（↑↓ 选择、Space 切换、Enter 保存、Esc 取消）/ 启用停用；Enter 确认、Esc 退出 |
+| `/statusbar` | 无参数打开交互式菜单：布局（auto/bottom/right/split）/ 面板边框 / 面板填充 / 语言（光标在对应行时 ←→ 调值，即时生效并写回配置）/ 指标显隐（↑↓ 选择、Space 切换、Enter 保存、Esc 取消）/ 启用停用；Enter 确认、Esc 退出 |
 | `/statusbar on\|off` | 启用 / 停用自定义状态栏（停用后恢复内置 footer） |
 | `/statusbar layout [right\|bottom\|auto\|split]` | 切换布局并写回配置，不带参数时按 自动 → 底部 → 右侧 → 真分栏 循环；选 `split` 会自动把 pi 的 `tuiMode` 设为 `fullscreen`（切走时还原） |
 | `/statusbar split [on\|off]` | `layout split` 的快捷别名：`on` = 真分栏，`off` = 回到默认布局；不带参数时取反 |
-| `/statusbar border [auto\|unicode\|ascii]` | 面板边框字符集（写回 `panelBorder` 并立即重绘），不带参数时按 auto → unicode → ascii 循环；出现「只错边框、不错文字」的终端残影时用 `ascii` |
+| `/statusbar border [auto\|unicode\|ascii]` | 面板边框字符集（写回 `panelBorder` 并立即重绘），不带参数时按 auto → unicode → ascii 循环 |
+| `/statusbar fill [on\|off]` | 分栏面板是否铺满整屏高度（写回 `panelFill` 并立即重绘），不带参数时取反；只对 `layout: split` 生效 |
 | `/statusbar metrics` | 直接进入指标显隐交互式配置 |
 | `/statusbar quota` | 强制刷新订阅额度并显示详情 |
 | `/statusbar prices` | 强制刷新实时单价并显示当前模型单价来源 |

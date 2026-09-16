@@ -35,11 +35,10 @@
  *     layout           "bottom" | "right" | "auto" | "split"（默认 "auto"）；split = 真分栏，
  *                      旧配置的 split: true 会自动迁移为 layout: "split"
  *     rightWidth       右侧面板宽度，默认 32，范围 [20, 60]
- *     panelBorder      面板边框字符集 "auto"（默认，按终端自动判定）| "unicode"（┌─┐│└┘）| "ascii"（+ - |）；
- *                      auto 在 TERM_PROGRAM=vscode（VSCode/Cursor 内置终端）时用 ascii：
- *                      这类终端对 U+2500 段方框字符走「自绘字形」通道，重绘不彻底时会留下
- *                      只有边框错位的残影；换 ascii 后与文字同层即可绕开。
- *                      也可用 /statusbar border [auto|unicode|ascii] 切换，或环境变量 PI_STATUSBAR_BORDER 覆盖
+ *     panelBorder      面板边框字符集 "auto"（默认，只跟随 PI_STATUSBAR_BORDER 环境变量）
+ *                      | "unicode"（┌─┐│└┘）| "ascii"（+ - |）；也可用 /statusbar border [auto|unicode|ascii] 切换
+ *     panelFill        分栏面板是否把边框铺满整屏高度（默认 true）；false = 高度贴内容。
+ *                      只对 layout=split 有意义（浮层本来就贴合内容）；也可用 /statusbar fill on|off
  *     hiddenMetrics    隐藏的指标 key 数组，可选：branch/ctx/model/effort/usage/ttft/speed/quota/ext；
  *                      也可用 /statusbar metrics 交互式配置（会写回此字段）
  *     language         配置面板显示语言 "zh" | "en"（默认 "zh"）；/statusbar 菜单语言行 ←→ 切换并即时写回
@@ -138,9 +137,11 @@ interface StatusbarConfig {
 	/** 开启 layout=split 时自动改写 pi settings.json 的 tuiMode，这里记录改前的值以便切回时还原。
 	 *  缺省 = 从未改过；"none" = 原本没有该字段（切回时删除）；"regular"/"fullscreen" = 原值 */
 	tuiModeBackup?: string;
-	/** 面板边框字符集，默认 unicode（方框绘制字符）；ascii 用于绕开个别终端对
-	 *  U+2500 段「自绘字形」重绘不彻底造成的边框错位残影 */
+	/** 面板边框字符集，默认 auto（只跟随 PI_STATUSBAR_BORDER）；见 PanelBorder */
 	panelBorder: PanelBorder;
+	/** 分栏面板是否把边框铺满整屏高度（默认 true）；false = 高度贴内容。
+	 *  只对 layout=split 有效（浮层本来就贴合内容），/statusbar fill on|off 同效 */
+	panelFill: boolean;
 	/** 隐藏的指标 key 列表（默认全部显示），/statusbar metrics 交互式配置 */
 	hiddenMetrics: MetricKey[];
 	/** 配置面板显示语言，默认 zh；/statusbar 菜单语言行 ←→ 切换（即时写回配置文件） */
@@ -151,9 +152,11 @@ interface StatusbarConfig {
 type Lang = "zh" | "en";
 
 /** 面板边框字符集：
- *  auto（默认）= 按终端自动判定（见 resolvePanelBorder）；unicode = ┌─┐│└┘；ascii = + - | 。
- *  为什么需要 ascii：部分终端把 U+2500 段方框字符交给独立的「自绘字形」（custom glyphs）
- *  通道绘制，该层漏重绘时会单独错位（文字行列仍是齐的），换 ascii 后与文字同层可绕开。 */
+ *  auto（默认）= 不主动改字形，只跟随 PI_STATUSBAR_BORDER 环境变量；
+ *  unicode = ┌─┐│└┘；ascii = + - | 。
+ *  为什么留 ascii：个别终端对 U+2500 段方框字符的处理确实会出问题，作为可手动切的后路。
+ *  注意：实测 ascii 并不能修复「行内排版漂移」那类残影（错位来自终端渲染器本身，
+ *  与方框字形无关），所以不再按 TERM_PROGRAM 自动猜。 */
 type PanelBorder = "auto" | "unicode" | "ascii";
 
 /** 可配置显隐的指标 */
@@ -197,10 +200,13 @@ const UI_TEXT = {
 		menuTitle: "状态栏设置",
 		rowLayout: "布局",
 		rowBorder: "面板边框",
+		rowFill: "面板填充",
 		rowLang: "语言",
 		rowMetrics: "指标显隐",
 		rowDisable: "停用自定义状态栏",
 		rowEnable: "启用自定义状态栏",
+		fillOn: "铺满高度",
+		fillOff: "贴内容",
 		metricsCount: (n: number, total: number) => `${n}/${total} 显示`,
 		menuHint: "↑↓ 选择 · ←→ 调整 · Enter 确认 · Esc 退出",
 		pickerTitle: "指标显隐",
@@ -225,10 +231,13 @@ const UI_TEXT = {
 		menuTitle: "Statusbar Settings",
 		rowLayout: "Layout",
 		rowBorder: "Panel border",
+		rowFill: "Panel fill",
 		rowLang: "Language",
 		rowMetrics: "Metrics",
 		rowDisable: "Disable custom statusbar",
 		rowEnable: "Enable custom statusbar",
+		fillOn: "Full height",
+		fillOff: "Fit content",
 		metricsCount: (n: number, total: number) => `${n}/${total} shown`,
 		menuHint: "↑↓ select · ←→ adjust · Enter confirm · Esc exit",
 		pickerTitle: "Metrics",
@@ -268,9 +277,10 @@ const DEFAULT_HIDE_EXT_STATUSES = ["LSP Inactive"];
 const DEFAULT_LAYOUT: LayoutMode = "auto";
 const DEFAULT_RIGHT_WIDTH = 32;
 const DEFAULT_PANEL_BORDER: PanelBorder = "auto";
-/** 面板边框字符表（h 横线 / v 竖线 / 四角） */
+const DEFAULT_PANEL_FILL = true;
+/** 面板边框字符表（h 横线 / v 竖线 / 四角）；auto 只是一种设定值，不参与查表 */
 const BORDER_CHARS: Record<
-	PanelBorder,
+	"unicode" | "ascii",
 	{ h: string; v: string; tl: string; tr: string; bl: string; br: string }
 > = {
 	unicode: { h: "─", v: "│", tl: "┌", tr: "┐", bl: "└", br: "┘" },
@@ -300,19 +310,13 @@ function toPanelBorder(v: unknown): PanelBorder {
 }
 
 /**
- * auto 模式下的边框字符集判定。
- * 终端不提供可查询的像素/重绘能力，这里只能用环境变量做启发式：
- *  - PI_STATUSBAR_BORDER=unicode|ascii  手动覆盖（最高优先级）
- *  - TERM_PROGRAM=vscode（VSCode / Cursor / 同系 fork 的内置终端）用 ascii：
- *    这类 Electron + xterm.js 终端带「自绘字形」通道，实测会对 U+2500 段方框字符
- *    漏重绘、留下只有边框错位的残影；换字体字形绘制即可绕开
- *  - 其它终端用 unicode（方框线连续、更好看）
+ * 边框字符集解析：显式设置优先；auto 只看 PI_STATUSBAR_BORDER 环境变量，
+ * 否则用 unicode。曾经按 TERM_PROGRAM=vscode 猜 ascii，但实测那类残影与方框字形无关
+ * （是终端渲染器的逐行排版/重绘问题），猜错只会白让边框变丑，所以去掉了。
  */
 function resolvePanelBorder(setting: PanelBorder): "unicode" | "ascii" {
-	if (setting !== "auto") return setting;
-	const env = process.env.PI_STATUSBAR_BORDER;
-	if (env === "unicode" || env === "ascii") return env;
-	return process.env.TERM_PROGRAM === "vscode" ? "ascii" : "unicode";
+	if (setting === "unicode" || setting === "ascii") return setting;
+	return process.env.PI_STATUSBAR_BORDER === "ascii" ? "ascii" : "unicode";
 }
 
 const BORDER_ORDER: PanelBorder[] = ["auto", "unicode", "ascii"];
@@ -360,6 +364,7 @@ function loadConfig(): StatusbarConfig {
 			layout: toLayoutMode(raw?.layout, raw?.split === true),
 			rightWidth: toRightWidth(raw?.rightWidth),
 			panelBorder: toPanelBorder(raw?.panelBorder),
+			panelFill: raw?.panelFill !== false,
 			tuiModeBackup:
 				typeof raw?.tuiModeBackup === "string" ? raw.tuiModeBackup : undefined,
 			hiddenMetrics: toMetricKeys(raw?.hiddenMetrics),
@@ -372,6 +377,7 @@ function loadConfig(): StatusbarConfig {
 			layout: DEFAULT_LAYOUT,
 			rightWidth: DEFAULT_RIGHT_WIDTH,
 			panelBorder: DEFAULT_PANEL_BORDER,
+			panelFill: DEFAULT_PANEL_FILL,
 			tuiModeBackup: undefined,
 			hiddenMetrics: [],
 			language: "zh",
@@ -392,6 +398,7 @@ function saveConfigPatch(patch: Record<string, unknown>): void {
 			layout: config.layout,
 			rightWidth: config.rightWidth,
 			panelBorder: config.panelBorder,
+			panelFill: config.panelFill,
 			tuiModeBackup: config.tuiModeBackup,
 			hiddenMetrics: config.hiddenMetrics,
 			language: config.language,
@@ -1260,8 +1267,9 @@ export default function (pi: ExtensionAPI) {
 					}
 				}
 			}
-			// 分栏模式：补满到视口高度（上下边框各占 1 行），超出部分由布局层裁切
-			const target = this.heightOf ? Math.max(1, this.heightOf() - 2) : 0;
+			// 分栏模式：panelFill 时补满到视口高度（上下边框各占 1 行），超出部分由布局层裁切
+			const target =
+				this.heightOf && config.panelFill ? Math.max(1, this.heightOf() - 2) : 0;
 			while (target > 0 && body.length < target) row("");
 			return [border(g.tl, g.tr), ...body, border(g.bl, g.br)];
 		}
@@ -1592,7 +1600,7 @@ export default function (pi: ExtensionAPI) {
 		private sel = 0;
 		private cachedW?: number;
 		private cachedLines?: string[];
-		private static readonly ROWS = 5;
+		private static readonly ROWS = 6;
 
 		constructor(
 			private theme: Theme,
@@ -1626,6 +1634,12 @@ export default function (pi: ExtensionAPI) {
 			this.invalidate();
 		}
 
+		/** 切换面板是否铺满高度（写回配置，与 /statusbar fill 共用） */
+		private toggleFill(): void {
+			setPanelFill(!config.panelFill);
+			this.invalidate();
+		}
+
 		handleInput(data: string): void {
 			for (const seq of splitKeySeqs(data)) this.handleKey(seq);
 		}
@@ -1647,17 +1661,19 @@ export default function (pi: ExtensionAPI) {
 			if (matchesKey(data, "left")) {
 				if (this.sel === 0) return this.cycleLayout(-1);
 				if (this.sel === 1) return this.cycleBorder();
-				if (this.sel === 2) return this.cycleLang();
+				if (this.sel === 2) return this.toggleFill();
+				if (this.sel === 3) return this.cycleLang();
 			}
 			if (matchesKey(data, "right")) {
 				if (this.sel === 0) return this.cycleLayout(1);
 				if (this.sel === 1) return this.cycleBorder();
-				if (this.sel === 2) return this.cycleLang();
+				if (this.sel === 2) return this.toggleFill();
+				if (this.sel === 3) return this.cycleLang();
 			}
 			if (matchesKey(data, "return")) {
-				if (this.sel === 3) return this.close("metrics");
-				if (this.sel === 4) return this.close("toggle");
-				return this.close(null); // 布局/边框/语言行：已实时生效，Enter 即完成退出
+				if (this.sel === 4) return this.close("metrics");
+				if (this.sel === 5) return this.close("toggle");
+				return this.close(null); // 布局/边框/填充/语言行：已实时生效，Enter 即完成退出
 			}
 		}
 
@@ -1669,6 +1685,7 @@ export default function (pi: ExtensionAPI) {
 			const labels = [
 				T.rowLayout,
 				T.rowBorder,
+				T.rowFill,
 				T.rowLang,
 				T.rowMetrics,
 				userWants ? T.rowDisable : T.rowEnable,
@@ -1706,24 +1723,38 @@ export default function (pi: ExtensionAPI) {
 					width,
 				),
 			);
-			// 行 2：语言
+			// 行 2：面板填充（只影响 layout=split；浮层本来就贴合内容）
 			lines.push(
 				menuRow(
 					th,
 					this.sel === 2,
 					labels[2],
-					adjustable(this.sel === 2, LANG_LABELS[config.language]),
+					adjustable(
+						this.sel === 2,
+						config.panelFill ? T.fillOn : T.fillOff,
+					),
 					labelCol,
 					width,
 				),
 			);
-			// 行 3：指标显隐（显示计数）
-			const hiddenCount = config.hiddenMetrics.length;
+			// 行 3：语言
 			lines.push(
 				menuRow(
 					th,
 					this.sel === 3,
 					labels[3],
+					adjustable(this.sel === 3, LANG_LABELS[config.language]),
+					labelCol,
+					width,
+				),
+			);
+			// 行 4：指标显隐（显示计数）
+			const hiddenCount = config.hiddenMetrics.length;
+			lines.push(
+				menuRow(
+					th,
+					this.sel === 4,
+					labels[4],
 					th.fg(
 						hiddenCount ? "warning" : "muted",
 						T.metricsCount(METRICS.length - hiddenCount, METRICS.length),
@@ -1732,8 +1763,8 @@ export default function (pi: ExtensionAPI) {
 					width,
 				),
 			);
-			// 行 4：启用/停用
-			lines.push(menuRow(th, this.sel === 4, labels[4], "", labelCol, width));
+			// 行 5：启用/停用
+			lines.push(menuRow(th, this.sel === 5, labels[5], "", labelCol, width));
 			lines.push("");
 			lines.push(truncateToWidth(`  ${th.fg("dim", T.menuHint)}`, width));
 			lines.push("");
@@ -2021,6 +2052,42 @@ export default function (pi: ExtensionAPI) {
 		setPanelBorder(next, (msg, type) => ctx.ui.notify(msg, type));
 	}
 
+	/**
+	 * 切换分栏面板是否铺满整屏高度（写回配置 + 整屏重绘，边框长度会变）。
+	 * 只对 layout=split 有效；浮层本来就贴合内容。
+	 */
+	function setPanelFill(
+		on: boolean,
+		notify?: (msg: string, type: "info" | "warning") => void,
+	): void {
+		const T = t();
+		if (config.panelFill === on) {
+			notify?.(`面板填充已是 ${on ? T.fillOn : T.fillOff}`, "info");
+			return;
+		}
+		config.panelFill = on;
+		try {
+			saveConfigPatch({ panelFill: on });
+		} catch {
+			// 写入失败不影响本次会话内的显示
+		}
+		activeTui?.requestRender(true);
+		notify?.(
+			`面板填充: ${on ? T.fillOn : T.fillOff}` +
+				(layoutMode === "split" ? "" : "（仅 layout=split 生效）"),
+			"info",
+		);
+	}
+
+	/** /statusbar fill 子命令入口（无参数 = 取反） */
+	function applyPanelFill(
+		ctx: ExtensionContext,
+		arg: string | undefined,
+	): void {
+		const on = arg ? arg === "on" : !config.panelFill;
+		setPanelFill(on, (msg, type) => ctx.ui.notify(msg, type));
+	}
+
 	/** 切换自定义状态栏 / 内置 footer */
 	function toggleStatusbar(ctx: ExtensionContext): void {
 		if (userWants) {
@@ -2092,7 +2159,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("statusbar", {
 		description:
-			"状态栏设置：无参数打开交互菜单；子命令 on/off | layout [right|bottom|auto|split] | split [on|off] | border [auto|unicode|ascii] | metrics | quota | prices",
+		"状态栏设置：无参数打开交互菜单；子命令 on/off | layout [right|bottom|auto|split] | split [on|off] | border [auto|unicode|ascii] | fill [on|off] | metrics | quota | prices",
 		handler: async (args, ctx) => {
 			const parts = args.trim().toLowerCase().split(/\s+/).filter(Boolean);
 			const sub = parts[0];
@@ -2137,6 +2204,15 @@ export default function (pi: ExtensionAPI) {
 				applyPanelBorder(ctx, a);
 				return;
 			}
+			if (sub === "fill") {
+				const a = parts[1];
+				if (a && a !== "on" && a !== "off") {
+					ctx.ui.notify(`无效参数: ${a}（可选 on / off）`, "warning");
+					return;
+				}
+				applyPanelFill(ctx, a);
+				return;
+			}
 			if (sub === "metrics") {
 				await runMetricsPicker(ctx);
 				return;
@@ -2151,7 +2227,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (sub) {
 				ctx.ui.notify(
-					`未知子命令: ${sub}。用法: /statusbar [on|off|layout [right|bottom|auto|split]|split [on|off]|border [auto|unicode|ascii]|metrics|quota|prices]，或无参数打开交互菜单`,
+					`未知子命令: ${sub}。用法: /statusbar [on|off|layout [right|bottom|auto|split]|split [on|off]|border [auto|unicode|ascii]|fill [on|off]|metrics|quota|prices]，或无参数打开交互菜单`,
 					"warning",
 				);
 				return;
