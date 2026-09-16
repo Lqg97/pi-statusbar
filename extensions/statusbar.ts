@@ -18,13 +18,13 @@
  *   底部单行各窗口用 · 连接，右侧面板逐窗口分行；带 TTL 缓存，失败静默；/statusbar quota 强制刷新并显示详情
  * - /exit 为 /quit 的别名，优雅退出 pi
  * - 窄终端先按 扩展状态 → 额度/token → 模型 的顺序收起，仍放不下则整段换行成多行（分支与上下文永不丢弃）
- * - 布局可配置（layout）：bottom 底部单行 / right 右侧悬浮竖卡面板 / auto（默认）/ split 真分栏
- *   auto 按终端宽度自动选择：≥120 列用右侧面板，否则底部单行，resize 实时切换；
- *   右侧面板为非捕获浮层（不抢键盘焦点），宽度由 rightWidth 配置（默认 32 列）；
+ * - 布局可配置（layout）：bottom 底部单行 / right 右侧浮层（浮在聊天上）/ auto（默认）/ split 右侧分栏
+ *   auto 按终端宽度自动选择：≥120 列用右侧浮层，否则底部单行，resize 实时切换；
+ *   浮层为非捕获 overlay（不抢键盘焦点），宽度由 rightWidth 配置（默认 32 列）；
  *   注意：浮层浮在聊天内容之上，会遮住右缘内容（regular 模式没有布局树，pi 扩展 API 无法真分栏）；
- *   split = 真分栏（类 opencode：把核心布局根包进 HStack，聊天按剩余宽度重新换行，完全不遮挡），
+ *   split = 右侧分栏（类 opencode：把核心布局根包进 HStack，聊天按剩余宽度重新换行，完全不遮挡），
  *   只要宽度 ≥ rightWidth+24 就用分栏（不套 auto 的 120 列阈值）；
- *   真分栏只在 fullscreen 模式（alt-screen）下成立，regular 模式/极窄终端自动退回底部单行，
+ *   右侧分栏只在 fullscreen 模式（alt-screen）下成立，regular 模式/极窄终端自动退回底部单行，
  *   且不再创建浮层（浮层会挡住 /settings 切换 TUI mode）；
  *   /statusbar 无参数打开交互式菜单（布局 ◀▶ 调值 / 面板边框 / 指标显隐 / 启停；Enter 确认，Esc 退出），
  *   或子命令快捷方式：/statusbar [on|off] | layout [right|bottom|auto|split] | split [on|off] | metrics
@@ -32,7 +32,7 @@
  * - 用户配置 ~/.pi/agent/statusbar.json（环境变量 PI_STATUSBAR_CONFIG 可覆盖路径）：
  *     priceMap         本地模型 → models.dev 单价映射，key 为 "provider:model" 或裸 "model"
  *     hideExtStatuses  按文本包含隐藏的其他扩展状态（默认 ["LSP Inactive"]）
- *     layout           "bottom" | "right" | "auto" | "split"（默认 "auto"）；split = 真分栏，
+ *     layout           "bottom" | "right" | "auto" | "split"（默认 "auto"）；split = 右侧分栏，
  *                      旧配置的 split: true 会自动迁移为 layout: "split"
  *     rightWidth       右侧面板宽度，默认 32，范围 [20, 60]
  *     panelBorder      面板边框字符集 "auto"（默认，只跟随 PI_STATUSBAR_BORDER 环境变量）
@@ -52,11 +52,11 @@ import type {
 	ReadonlyFooterDataProvider,
 	Theme,
 } from "@earendil-works/pi-coding-agent";
-// 同上：getSettingsPath 用于「开真分栏时自动把 pi 的 TUI mode 设为 fullscreen」，
+// 同上：getSettingsPath 用于「开右侧分栏时自动把 pi 的 TUI mode 设为 fullscreen」，
 // 命名空间导入避免旧版没有该导出时在链接期抛错
 import * as piAgentRuntime from "@earendil-works/pi-coding-agent";
 // 命名空间导入：HStack 在旧版 pi-tui 中不存在，命名导入会在链接期直接抛错，
-// 命名空间导入只是取到 undefined，便于「有就用真分栏，没有就静默降级」
+// 命名空间导入只是取到 undefined，便于「有就用右侧分栏，没有就静默降级」
 import * as piTuiRuntime from "@earendil-works/pi-tui";
 import {
 	matchesKey,
@@ -116,9 +116,9 @@ interface QuotaSource {
 
 /** 状态栏布局：
  *  bottom      底部单行 footer
- *  right       右侧面板（浮层，始终）
- *  auto        终端列数 ≥ AUTO_MIN_WIDTH 时用右侧面板，否则底部单行（默认）
- *  split       真分栏（fullscreen 布局分栏，聊天按剩余宽度重新换行、完全不遮挡）；
+ *  right       右侧浮层（overlay，始终）
+ *  auto        终端列数 ≥ AUTO_MIN_WIDTH 时用右侧浮层，否则底部单行（默认）
+ *  split       右侧分栏（fullscreen 布局分栏，聊天按剩余宽度重新换行、完全不遮挡）；
  *              宽度 ≥ rightWidth + 24 时生效，否则回退底部单行；regular 模式/缺 HStack 同样回退
  */
 type LayoutMode = "bottom" | "right" | "auto" | "split";
@@ -130,7 +130,7 @@ interface StatusbarConfig {
 	 *  默认隐藏 pi-lens 的 "LSP Inactive"（未编辑代码时的被动状态），保留 LSP Active / Failed 等有信息量的状态。
 	 */
 	hideExtStatuses: string[];
-	/** 布局模式，默认 auto（终端 ≥120 列时右侧面板，否则底部单行）；见 LayoutMode */
+	/** 布局模式，默认 auto（终端 ≥120 列时右侧浮层，否则底部单行）；见 LayoutMode */
 	layout: LayoutMode;
 	/** 右侧面板宽度（列），默认 32，读取时 clamp 到 [20, 60] */
 	rightWidth: number;
@@ -189,8 +189,8 @@ const METRICS: { key: MetricKey; zh: string; en: string }[] = [
 
 const LAYOUT_ORDER: LayoutMode[] = ["auto", "bottom", "right", "split"];
 const LAYOUT_LABELS: Record<Lang, Record<LayoutMode, string>> = {
-	zh: { auto: "自动", bottom: "底部单行", right: "右侧面板", split: "真分栏" },
-	en: { auto: "Auto", bottom: "Bottom", right: "Right panel", split: "Split" },
+	zh: { auto: "自动", bottom: "底部单行", right: "右侧浮层", split: "右侧分栏" },
+	en: { auto: "Auto", bottom: "Bottom", right: "Right overlay", split: "Right column" },
 };
 const LANG_LABELS: Record<Lang, string> = { zh: "中文", en: "English" };
 
@@ -217,11 +217,11 @@ const UI_TEXT = {
 		canceled: "已取消，配置未保存",
 		noTui: "当前模式不支持交互式配置，请直接改配置文件",
 		splitNeedFullscreen: "需重启生效",
-		splitEnabled: "真分栏已开启",
-		splitDisabled: "真分栏已关闭",
+		splitEnabled: "右侧分栏已开启",
+		splitDisabled: "右侧分栏已关闭",
 		splitNeedsRestart:
 			"已自动把 pi 的 TUI mode 设为 fullscreen：重启 pi 后生效（当前会话仍是 regular，已退回底部单行）",
-		splitRestored: "真分栏已关闭，pi 的 TUI mode 已还原",
+		splitRestored: "右侧分栏已关闭，pi 的 TUI mode 已还原",
 		splitSetFailed:
 			"自动写入 pi settings.json 失败，请手动在 /settings → TUI mode 里切到 fullscreen",
 		splitUnavailable:
@@ -248,15 +248,15 @@ const UI_TEXT = {
 		canceled: "Cancelled, not saved",
 		noTui: "Interactive config requires TUI mode; edit the config file instead",
 		splitNeedFullscreen: "restart to apply",
-		splitEnabled: "Split panel enabled",
-		splitDisabled: "Split panel disabled",
+		splitEnabled: "Right column enabled",
+		splitDisabled: "Right column disabled",
 		splitNeedsRestart:
 			"Set pi TUI mode to fullscreen for you: restart pi to apply (this session stays regular, using the bottom line)",
-		splitRestored: "Split panel disabled; pi TUI mode restored",
+		splitRestored: "Right column disabled; pi TUI mode restored",
 		splitSetFailed:
 			"Could not write pi settings.json; switch manually via /settings → TUI mode → fullscreen",
 		splitUnavailable:
-			"Split panel needs fullscreen mode (/settings → TUI mode) and a pi-tui build that exports HStack",
+			"Right column needs fullscreen mode (/settings → TUI mode) and a pi-tui build that exports HStack",
 	},
 } as const;
 
@@ -286,7 +286,7 @@ const BORDER_CHARS: Record<
 	unicode: { h: "─", v: "│", tl: "┌", tr: "┐", bl: "└", br: "┘" },
 	ascii: { h: "-", v: "|", tl: "+", tr: "+", bl: "+", br: "+" },
 };
-/** auto 模式阈值：终端列数 ≥ 该值时使用右侧面板 */
+/** auto 模式阈值：终端列数 ≥ 该值时使用右侧浮层 */
 const AUTO_MIN_WIDTH = 120;
 
 function toLayoutMode(v: unknown, legacySplit = false): LayoutMode {
@@ -1218,7 +1218,7 @@ export default function (pi: ExtensionAPI) {
 
 	/** 右侧信息面板：竖排 label/value 行 + 边框。
 	 *  overlay 模式下（无 heightOf）高度贴合内容；
-	 *  真分栏模式下传入 heightOf，把卡片铺满整个视口高度，避免右侧留下一条空白列。 */
+	 *  右侧分栏模式下传入 heightOf，把卡片铺满整个视口高度，避免右侧留下一条空白列。 */
 	const PANEL_LABEL_W = 7;
 	class StatusPanel implements Component {
 		constructor(
@@ -1302,12 +1302,19 @@ export default function (pi: ExtensionAPI) {
 								anchor: "right-center",
 								width: config.rightWidth,
 								maxHeight: "80%",
-								// right:0：与真分栏面板同一列。浮层是 right:1（面板左移一格），
+								// right:0：与右侧分栏面板同一列。浮层是 right:1（面板左移一格），
 								// 切换 split 开关时面板会左右跳一格，终端只会重绘变化过的行，
 								// 于是留下半旧半新的错位残影（用户反馈的“不对齐”）
 								margin: { right: 0 },
 								nonCapturing: true,
-								visible: (w: number) => userWants && panelAlive && panelActive(w),
+							visible: (w: number) =>
+								userWants &&
+								panelAlive &&
+								// 进分栏的过渡帧：分栏还没装好就先把浮层顶住，避免面板闪掉一帧；
+								// 装好了（或本来就未在切分栏）就按普通规则：只在该显示浮层时可见
+								(layoutMode === "split"
+									? !(activeTui && splitInstalled(activeTui))
+									: panelActive(w)),
 							}),
 						},
 					)
@@ -1333,7 +1340,7 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	// ---------- 真分栏（split）：仅 fullscreen/alt-screen 模式具备布局树 ----------
+	// ---------- 右侧分栏（split）：仅 fullscreen/alt-screen 模式具备布局树 ----------
 
 	/** 我们安装的 HStack（幂等判据 + 卸载依据）；splitCore 是它包住的核心布局根（transcript + dock） */
 	let splitWrapper: Component | null = null;
@@ -1364,7 +1371,7 @@ export default function (pi: ExtensionAPI) {
 	/** pi-tui 是否提供 HStack（旧版本没有；命名导入会在链接期直接抛错，所以用命名空间导入 + 一次性特性检测） */
 	const HAS_PI_TUI_HSTACK = typeof piTuiRuntime.HStack === "function";
 
-	/** 当前 TUI 是否具备真分栏能力：fullscreen 布局树 + pi-tui 提供 HStack */
+	/** 当前 TUI 是否具备右侧分栏能力：fullscreen 布局树 + pi-tui 提供 HStack */
 	function splitCapable(tui: TUI | null): boolean {
 		if (!tui || tui.mode !== "fullscreen") return false;
 		if (!HAS_PI_TUI_HSTACK) return false;
@@ -1384,7 +1391,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/**
-	 * 安装真分栏：把核心布局根（transcript + dock 的 VStack）包进 HStack，右侧挂状态面板。
+	 * 安装右侧分栏：把核心布局根（transcript + dock 的 VStack）包进 HStack，右侧挂状态面板。
 	 * 聊天按剩余宽度重新换行，不遮挡任何内容 —— 与 opencode 的 flexDirection="row" 同构。
 	 * 幂等；微任务延迟，不在 render 周期内同步改写布局树。
 	 */
@@ -1432,8 +1439,11 @@ export default function (pi: ExtensionAPI) {
 				splitCore = core;
 				splitBasis = basis;
 				t.setLayoutRoot(wrapper);
-				// 布局树变更后强制整屏重绘：否则终端会保留上一帧的残行（面板错位一格）
-				tui.requestRender(true);
+				// 分栏已装好，这时才关浇浮层：切换过程中面板不会“消失一帧”
+				closePanel();
+				// 普通重绘即可（布局变了，受影响的行字符串都变了）；
+				// 不要用 requestRender(true) 整屏清屏，那会闪一下，切换很不丝滑
+				tui.requestRender();
 			} catch {
 				// 布局根不可用（pi 升级改了结构 / 缺 HStack）：静默回退浮层或底部单行
 				splitWrapper = null;
@@ -1443,7 +1453,7 @@ export default function (pi: ExtensionAPI) {
 		});
 	}
 
-	/** 卸载真分栏，把核心布局根还回去 */
+	/** 卸载右侧分栏，把核心布局根还回去 */
 	function closeSplit(): void {
 		const wrapper = splitWrapper;
 		const core = splitCore;
@@ -1460,11 +1470,10 @@ export default function (pi: ExtensionAPI) {
 		try {
 			if (t.layoutRoot === wrapper) {
 				t.setLayoutRoot(core ?? undefined);
-				// 卸掉分栏同样会改变面板列位置：微任务里强制整屏重绘，清掉旧列残影。
-				// 不能同步调（closeSplit 可能从 render 里调用，重绘会打断当前渲染）
+				// 同理：普通重绘即可，不做整屏清屏（避免切换时闪一下）
 				queueMicrotask(() => {
 					try {
-						tui.requestRender(true);
+						tui.requestRender();
 					} catch {
 						// TUI 已销毁，忽略
 					}
@@ -1496,22 +1505,28 @@ export default function (pi: ExtensionAPI) {
 				render(width: number): string[] {
 					const ctx = currentCtx;
 					if (!ctx) return [];
-					// 配置热更新/菜单关闭分栏后的兜底卸载
-					if (splitWrapper && layoutMode !== "split") closeSplit();
-					// 宽终端（或强制 right）时由右侧面板接管，底部让位；面板未就绪时仍渲染底部兜底
+					// 分栏 / 浮层 / 底部单行 三态切换：尽量保证每一帧都有面板，且不做整屏清屏（会闪）
+					// 分栏下 footer 收到的宽度已被侧栏扣掉，归属判定用整个视口宽度
+					const fullW = splitViewportW || tui.terminal.columns;
 					if (layoutMode === "split") {
-						// 分栏下 footer 收到的宽度已被侧栏扣掉，归属判定必须用整个视口宽度。
 						// layout=split 是显式选择：只要装得下（≥ rightWidth+24）就分栏，不再叠一层 auto 的 120 列阈值
-						const panelW = splitViewportW || tui.terminal.columns;
-						if (splitWidthOk(panelW)) {
+						if (splitWidthOk(fullW)) {
 							ensureSplit(tui, theme);
-							// 仅在 wrapper 真的装在当前 renderer 上时才让位（核心重设 layoutRoot 的那一帧继续渲染底部）
-							if (splitInstalled(tui)) return [];
+							// 本帧就会装上（pending）或已装好：让位。
+							// 只有“确实装不上”（非 pending）时才回退渲染底部单行
+							if (splitPending || splitInstalled(tui)) return [];
+						} else if (splitWrapper) {
+							closeSplit(); // 极窄终端：拆掉退回底部单行
 						}
-						// 分栏不可用（regular 模式 / 极窄 / 缺 HStack）：继续渲染底部单行
-					} else if (panelActive(width)) {
+					} else if (panelActive(fullW)) {
+						// 该显示浮层：先把浮层起起来，就绪后再拆分栏，避免中间出现无面板的帧
 						ensurePanel(ctx);
-						if (panelAlive || panelPending) return [];
+						if (panelAlive || panelPending) {
+							if (splitWrapper) closeSplit();
+							return [];
+						}
+					} else if (splitWrapper) {
+						closeSplit(); // 目标是底部单行：直接拆
 					}
 					const sep = theme.fg("dim", " │ ");
 					const segs = buildSegments(ctx, theme, footerData, "footer");
@@ -1869,7 +1884,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/**
-	 * 开关真分栏并提示（写回配置文件，与 language 一样持久化）。
+	 * 开关右侧分栏并提示（写回配置文件，与 language 一样持久化）。
 	 * 需 fullscreen 模式才真正生效；regular 模式/缺 HStack 时退回底部单行（不建浮层）。
 	 */
 	/** pi 全局设置文件路径（split 自动同步 TUI mode 用；尊重 PI_CODING_AGENT_DIR） */
@@ -1893,7 +1908,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/**
-	 * 开启真分栏时自动把 pi 的 tuiMode 设为 fullscreen（避免用户要改两处配置），关闭时还原。
+	 * 开启右侧分栏时自动把 pi 的 tuiMode 设为 fullscreen（避免用户要改两处配置），关闭时还原。
 	 * 安全性：pi 自己的 settings 保存只合并「已修改字段」（settings-manager.persistScopedSettings
 	 * 先读文件再合并），所以这里的外部写入不会被 pi 后续保存抹掉。
 	 */
@@ -1958,18 +1973,18 @@ export default function (pi: ExtensionAPI) {
 		} catch {
 			// 写入失败不影响本次会话内的显示
 		}
-		// 进分栏：先卸掉旧的右侧浮层（浮层不认分栏，留着会和分栏面板叠在一起）
-		// 出分栏：卸掉分栏，下一帧 footer 渲染时自动回退到浮层/底部单行
-		if (next === "split") closePanel();
-		else if (prev === "split") closeSplit();
-		// 右侧面板的位置/高度变了：强制整屏重绘，避免残影
-		if (userWants) activeTui?.requestRender(true);
+		// 进分栏：不在这里关浮层 —— 浮层的 visible 会一直顶到分栏装好（见 overlayOptions）
+		// 出分栏：也不在这里拆 —— 等浮层就绪后由 footer 下一帧拆（见 render 里的分支），
+		// 这样两个方向都不会出现“既没有分栏也没有浮层”的中间帧
+		if (!userWants) closeSplit();
+		// 面板位置/高度变了：普通重绘即可，不做整屏清屏（否则切换时会闪一下）
+		if (userWants) activeTui?.requestRender();
 
 		if (next !== "split" && prev !== "split") {
 			if (!notify) return;
 			notify(
 				next === "auto"
-					? `状态栏布局: auto（终端 ≥${AUTO_MIN_WIDTH} 列时右侧面板，否则底部单行）`
+					? `状态栏布局: auto（终端 ≥${AUTO_MIN_WIDTH} 列时右侧浮层，否则底部单行）`
 					: `状态栏布局: ${LAYOUT_LABELS[config.language][next]}`,
 				"info",
 			);
@@ -2028,7 +2043,7 @@ export default function (pi: ExtensionAPI) {
 		} catch {
 			// 写入失败不影响本次会话内的显示
 		}
-		activeTui?.requestRender(true);
+		activeTui?.requestRender();
 		notify?.(
 			`面板边框: ${panelBorderLabel(next)}` +
 				(resolvePanelBorder(next) === "ascii"
@@ -2068,7 +2083,7 @@ export default function (pi: ExtensionAPI) {
 		} catch {
 			// 写入失败不影响本次会话内的显示
 		}
-		activeTui?.requestRender(true);
+		activeTui?.requestRender();
 		notify?.(
 			`面板填充: ${on ? T.fillOn : T.fillOff}` +
 				(layoutMode === "split" ? "" : "（仅 layout=split 生效）"),
@@ -2268,8 +2283,8 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// 会话被替换/重载/退出前：卸掉真分栏并清空缓存引用。
-	// 关键：真分栏挂在 pi 的布局树上，不随 reload 一起销毁；旧实例的 StatusPanel
+	// 会话被替换/重载/退出前：卸掉右侧分栏并清空缓存引用。
+	// 关键：右侧分栏挂在 pi 的布局树上，不随 reload 一起销毁；旧实例的 StatusPanel
 	// 若留着，reload 后仍会渲染并读陈旧 ctx —— pi 的陈旧 ctx 守卫会抛错，
 	// 而布局渲染异常 = uncaughtException，pi 直接退出。
 	pi.on("session_shutdown", async () => {
@@ -2293,7 +2308,7 @@ export default function (pi: ExtensionAPI) {
 				// 写失败不影响使用，下次会话再试
 			}
 		}
-		// 真分栏需要 fullscreen：自动补齐 pi 的 TUI mode，用户只需配 layout 一处；写成功才提示（避免每次 /new 都刷）
+		// 右侧分栏需要 fullscreen：自动补齐 pi 的 TUI mode，用户只需配 layout 一处；写成功才提示（避免每次 /new 都刷）
 		if (layoutMode === "split" && HAS_PI_TUI_HSTACK && !splitCapable(activeTui)) {
 			const sync = syncPiTuiMode(true);
 			if (sync.wrote) ctx.ui.notify(t().splitNeedsRestart, "info");

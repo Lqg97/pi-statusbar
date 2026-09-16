@@ -1,6 +1,6 @@
 # pi-statusbar
 
-[pi](https://github.com/badlogic/pi-mono) 自定义状态栏扩展：展示 git 分支、token 用量、实时花费、首 token 耗时、输出吞吐、上下文占用与订阅额度。支持四种布局（`layout`）：**底部单行 footer**、类 opencode 的**右侧悬浮信息面板**（浮层，遮右缘）、**真分栏**（`layout: "split"`，聊天按剩余宽度重新换行，完全不遮挡，仅 fullscreen 模式可用），以及按终端宽度自动切换（`auto`，默认）。
+[pi](https://github.com/badlogic/pi-mono) 自定义状态栏扩展：展示 git 分支、token 用量、实时花费、首 token 耗时、输出吞吐、上下文占用与订阅额度。支持四种布局（`layout`）：**底部单行 footer**、**右侧浮层**（类 opencode 的悬浮信息面板，浮在聊天上、遮右缘）、**右侧分栏**（`layout: "split"`，占一列、聊天按剩余宽度重新换行，完全不遮挡，仅 fullscreen 模式可用），以及按终端宽度自动切换（`auto`，默认）。
 
 ```text
 main │ ↑12.3k ↓45.6k ⚡100k·85% $0.123 ⏱980ms 128 tok/s │ ▰▰▰▱▱▱▱▱▱▱ 23% │ GLM 5h 12%(3h56m)·1周 34%(6d10h) │ glm-5.3·high │ LSP Active
@@ -21,7 +21,7 @@ main │ ↑12.3k ↓45.6k ⚡100k·85% $0.123 ⏱980ms 128 tok/s │ ▰▰▰�
 
 - **终端标题**：会话名写入终端标题（`pi · 会话名`），不占 footer 宽度
 - **窄终端自适应**：按 扩展状态 → 额度/token → 模型 的顺序逐段收起，仍放不下时整段换行成多行（分支与上下文永不丢弃）
-- **布局可选（layout）**：`bottom` 底部单行 / `right` 右侧悬浮竖卡面板（Model 与 Effort 分行显示，超长自动换行不截断）/ `auto`（默认）按终端宽度自动选择（≥120 列用右侧面板），拖拽 resize 实时切换
+- **布局可选（layout）**：`bottom` 底部单行 / `right` 右侧浮层（竖卡，Model 与 Effort 分行显示，超长自动换行不截断）/ `auto`（默认）按终端宽度自动选择（≥120 列用右侧浮层），拖拽 resize 实时切换 / `split` 右侧分栏
 - **指标显隐可配置**：交互式勾选要展示的指标（分支 / 上下文 / 模型 / effort / 用量 / TTFT / 吞吐 / 额度 / 扩展状态），即时预览，保存写回配置文件 `hiddenMetrics` 字段
 - **配置面板中英双语**：`language` 配置项或菜单内 ←→ 实时切换，菜单/指标选择器/提示文案跟随语言
 - **单一命令 `/statusbar`**：无参数打开交互式菜单（布局切换 / 指标显隐 / 启用停用），也支持子命令快捷方式；新会话默认恢复自定义样式
@@ -53,8 +53,8 @@ pi -e git:github.com/Lqg97/pi-statusbar
  },
  // 按文本包含隐藏其他扩展的 footer 状态（默认 ["LSP Inactive"]）
  "hideExtStatuses": ["LSP Inactive"],
- // 布局："bottom" 底部单行 / "right" 右侧面板（浮层）/ "auto" 按宽度自动（默认）
- //       / "split" 真分栏（布局分栏，聊天按剩余宽度重新换行、完全不遮挡，仅 fullscreen 可用）
+ // 布局："bottom" 底部单行 / "right" 右侧浮层（浮在聊天上）/ "auto" 按宽度自动（默认）
+ //       / "split" 右侧分栏（占一列、聊天按剩余宽度重新换行、完全不遮挡，仅 fullscreen 可用）
  //       split 时扩展会自动把 pi 的 tuiMode 设为 fullscreen（切回其他布局时还原）
  "layout": "auto",
  // 右侧面板宽度（列），默认 32，范围 [20, 60]
@@ -76,10 +76,10 @@ pi -e git:github.com/Lqg97/pi-statusbar
 
 **布局说明**：`auto` 模式下终端 ≥120 列时状态收进右侧竖卡（Branch / Ctx / Model / In / Out / Cache / Cost / TTFT / Speed / Quota 每行一项，带边框），底部 footer 让位；<120 列时回到单行 footer。右侧竖卡有两种实现：
 
-- **浮层（`layout: "right"` / `auto`）**：非捕获 overlay，不抢键盘焦点，但会**遮住聊天内容右缘**（regular 模式没有布局树，pi 扩展 API 无法真分栏）。
-- **真分栏（`layout: "split"`）**：把 pi 的核心布局根（transcript + 底部 dock）包进 `HStack`，右侧挂状态卡片——**与 opencode 的 `flexDirection="row"` 同构**：聊天按剩余宽度重新换行，整屏高卡片，不遮挡任何内容。它是显式选择，所以**不再套 `auto` 的 120 列阈值**：只要宽度 ≥ `rightWidth + 24` 就分栏（避免把聊天压成一条），更窄才退回底部单行。
+- **右侧浮层（`layout: "right"` / `auto`）**：非捕获 overlay，不抢键盘焦点，但会**遮住聊天内容右缘**（regular 模式没有布局树，pi 扩展 API 无法分栏）。
+- **右侧分栏（`layout: "split"`）**：把 pi 的核心布局根（transcript + 底部 dock）包进 `HStack`，右侧挂状态卡片——**与 opencode 的 `flexDirection="row"` 同构**：聊天按剩余宽度重新换行，整屏高卡片，不遮挡任何内容。它是显式选择，所以**不再套 `auto` 的 120 列阈值**：只要宽度 ≥ `rightWidth + 24` 就分栏（避免把聊天压成一条），更窄才退回底部单行。
 
-真分栏的前提是 **fullscreen 模式**（alt-screen，只有它有布局树）。这个前提**不用你手动配**：布局切到 `split` 时扩展会自己把 pi settings.json 的 `tuiMode` 写成 `"fullscreen"`（改前的值存到 `statusbar.json` 的 `tuiModeBackup`，切回其他布局时还原），所以**只配一个字段就够了**。
+右侧分栏的前提是 **fullscreen 模式**（alt-screen，只有它有布局树）。这个前提**不用你手动配**：布局切到 `split` 时扩展会自己把 pi settings.json 的 `tuiMode` 写成 `"fullscreen"`（改前的值存到 `statusbar.json` 的 `tuiModeBackup`，切回其他布局时还原），所以**只配一个字段就够了**。
 
 （旧配置里单独的 `"split": true` 会在读取时自动迁移为 `"layout": "split"`，无需手改。）
 
@@ -87,14 +87,14 @@ pi -e git:github.com/Lqg97/pi-statusbar
 
 ```text
 /statusbar layout split   →  提示「已自动把 TUI mode 设为 fullscreen：重启 pi 后生效」
-重启 pi                    →  右侧直接是真分栏
+重启 pi                    →  右侧直接变成右侧分栏
 ```
 
 （也可以 `/settings` → TUI mode 当场切，效果一样。）外部写入不会被 pi 覆盖：pi 保存 settings.json 时只合并「本次修改的字段」，其他字段原样保留。
 
 regular 模式下选 `split` 不会报错，而是退回底部单行、且**不再创建浮层**——因为浮层会让 pi 拒绝切换 TUI mode（`Close active overlays before changing TUI mode`）。
 
-实测：`/statusbar layout split` → 重启 → 右侧面板从浮层变成真分栏，拖拽窗口宽度时实时重判（≥ rightWidth+24 就分栏）；`/statusbar layout auto`（或 `split off`）立即恢复浮层并把 `tuiMode` 还原。
+实测：`/statusbar layout split` → 重启 → 右侧面板从右侧浮层变成右侧分栏，拖拽窗口宽度时实时重判（≥ rightWidth+24 就分栏）；`/statusbar layout auto`（或 `split off`）立即恢复右侧浮层并把 `tuiMode` 还原。
 
 **单价自动匹配规则**（未配置 priceMap 时，按顺序取第一个命中）：
 
@@ -111,8 +111,8 @@ regular 模式下选 `split` 不会报错，而是退回底部单行、且**不�
 | --- | --- |
 | `/statusbar` | 无参数打开交互式菜单：布局（auto/bottom/right/split）/ 面板边框 / 面板填充 / 语言（光标在对应行时 ←→ 调值，即时生效并写回配置）/ 指标显隐（↑↓ 选择、Space 切换、Enter 保存、Esc 取消）/ 启用停用；Enter 确认、Esc 退出 |
 | `/statusbar on\|off` | 启用 / 停用自定义状态栏（停用后恢复内置 footer） |
-| `/statusbar layout [right\|bottom\|auto\|split]` | 切换布局并写回配置，不带参数时按 自动 → 底部 → 右侧 → 真分栏 循环；选 `split` 会自动把 pi 的 `tuiMode` 设为 `fullscreen`（切走时还原） |
-| `/statusbar split [on\|off]` | `layout split` 的快捷别名：`on` = 真分栏，`off` = 回到默认布局；不带参数时取反 |
+| `/statusbar layout [right\|bottom\|auto\|split]` | 切换布局并写回配置，不带参数时按 自动 → 底部 → 右侧 → 右侧分栏 循环；选 `split` 会自动把 pi 的 `tuiMode` 设为 `fullscreen`（切走时还原） |
+| `/statusbar split [on\|off]` | `layout split` 的快捷别名：`on` = 右侧分栏，`off` = 回到默认布局；不带参数时取反 |
 | `/statusbar border [auto\|unicode\|ascii]` | 面板边框字符集（写回 `panelBorder` 并立即重绘），不带参数时按 auto → unicode → ascii 循环 |
 | `/statusbar fill [on\|off]` | 分栏面板是否铺满整屏高度（写回 `panelFill` 并立即重绘），不带参数时取反；只对 `layout: split` 生效 |
 | `/statusbar metrics` | 直接进入指标显隐交互式配置 |
