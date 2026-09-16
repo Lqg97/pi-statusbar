@@ -47,6 +47,10 @@
  *                      | "unicode"（┌─┐│└┘）| "ascii"（+ - |）；也可用 /statusbar border [auto|unicode|ascii] 切换
  *     panelFill        分栏面板是否把边框铺满整屏高度（默认 true）；false = 高度贴内容。
  *                      只对 layout=split 有意义（浮层本来就贴合内容）；也可用 /statusbar fill on|off
+ *     dockWidgetsInSplit  split 分栏时把 pi「编辑器上方」的 widget 容器（subagent 的 agent 面板）
+ *                      搬进右栏：状态面板在上、agent 面板在下（默认 true）。点击折叠等鼠标交互
+ *                      按布局位置命中，搬动后保留；panelFill 在搬入期间自动让位（面板贴内容）。
+ *                      也可用 /statusbar dock on|off；仅 split 生效，其余布局/极窄终端自动回底部
  *     hiddenMetrics    隐藏的指标 key 数组，可选：branch/ctx/model/effort/usage/ttft/speed/quota/ext；
  *                      也可用 /statusbar metrics 交互式配置（会写回此字段）
  *     language         配置面板显示语言 "zh" | "en"（默认 "zh"）；/statusbar 菜单语言行 ←→ 切换并即时写回
@@ -156,6 +160,9 @@ interface StatusbarConfig {
 	/** 分栏面板是否把边框铺满整屏高度（默认 true）；false = 高度贴内容。
 	 *  只对 layout=split 有效（浮层本来就贴合内容），/statusbar fill on|off 同效 */
 	panelFill: boolean;
+	/** split 分栏时把 pi「编辑器上方」的 widget 容器（subagent 的 agent 面板）搬进右栏（默认 true）；
+	 *  /statusbar dock on|off 同效。仅 split 生效，其余布局自动留在底部 */
+	dockWidgetsInSplit: boolean;
 	/** 隐藏的指标 key 列表（默认全部显示），/statusbar metrics 交互式配置 */
 	hiddenMetrics: MetricKey[];
 	/** 配置面板显示语言，默认 zh；/statusbar 菜单语言行 ←→ 切换（即时写回配置文件） */
@@ -222,12 +229,15 @@ const UI_TEXT = {
 		rowLayout: "布局",
 		rowBorder: "面板边框",
 		rowFill: "面板填充",
+		rowDock: "Agent 面板入栏",
 		rowLang: "语言",
 		rowMetrics: "指标显隐",
 		rowDisable: "停用自定义状态栏",
 		rowEnable: "启用自定义状态栏",
 		fillOn: "铺满高度",
 		fillOff: "贴内容",
+		dockIn: "搬入右栏",
+		dockOut: "留在底部",
 		metricsCount: (n: number, total: number) => `${n}/${total} 显示`,
 		menuHint: "↑↓ 选择 · ←→ 调整 · Enter 确认 · Esc 退出",
 		pickerTitle: "指标显隐",
@@ -253,12 +263,15 @@ const UI_TEXT = {
 		rowLayout: "Layout",
 		rowBorder: "Panel border",
 		rowFill: "Panel fill",
+		rowDock: "Agent dock",
 		rowLang: "Language",
 		rowMetrics: "Metrics",
 		rowDisable: "Disable custom statusbar",
 		rowEnable: "Enable custom statusbar",
 		fillOn: "Full height",
 		fillOff: "Fit content",
+		dockIn: "Right column",
+		dockOut: "Bottom",
 		metricsCount: (n: number, total: number) => `${n}/${total} shown`,
 		menuHint: "↑↓ select · ←→ adjust · Enter confirm · Esc exit",
 		pickerTitle: "Metrics",
@@ -386,6 +399,7 @@ function loadConfig(): StatusbarConfig {
 			rightWidth: toRightWidth(raw?.rightWidth),
 			panelBorder: toPanelBorder(raw?.panelBorder),
 			panelFill: raw?.panelFill !== false,
+			dockWidgetsInSplit: raw?.dockWidgetsInSplit !== false,
 			tuiModeBackup:
 				typeof raw?.tuiModeBackup === "string" ? raw.tuiModeBackup : undefined,
 			hiddenMetrics: toMetricKeys(raw?.hiddenMetrics),
@@ -399,6 +413,7 @@ function loadConfig(): StatusbarConfig {
 			rightWidth: DEFAULT_RIGHT_WIDTH,
 			panelBorder: DEFAULT_PANEL_BORDER,
 			panelFill: DEFAULT_PANEL_FILL,
+			dockWidgetsInSplit: true,
 			tuiModeBackup: undefined,
 			hiddenMetrics: [],
 			language: "zh",
@@ -420,6 +435,7 @@ function saveConfigPatch(patch: Record<string, unknown>): void {
 			rightWidth: config.rightWidth,
 			panelBorder: config.panelBorder,
 			panelFill: config.panelFill,
+			dockWidgetsInSplit: config.dockWidgetsInSplit,
 			tuiModeBackup: config.tuiModeBackup,
 			hiddenMetrics: config.hiddenMetrics,
 			language: config.language,
@@ -1530,9 +1546,12 @@ export default function (pi: ExtensionAPI) {
 					}
 				}
 			}
-			// 分栏模式：panelFill 时补满到视口高度（上下边框各占 1 行），超出部分由布局层裁切
+			// 分栏模式：panelFill 时补满到视口高度（上下边框各占 1 行），超出部分由布局层裁切；
+			// agent 面板入栏（dockedWidget）时让位给内容高度，否则填满的面板会把 agent 面板挤出屏
 			const target =
-				this.heightOf && config.panelFill ? Math.max(1, this.heightOf() - 2) : 0;
+				this.heightOf && config.panelFill && !dockedWidget
+					? Math.max(1, this.heightOf() - 2)
+					: 0;
 			while (target > 0 && body.length < target) row("");
 			return [border(g.tl, g.tr), ...body, border(g.bl, g.br)];
 		}
@@ -1615,6 +1634,103 @@ export default function (pi: ExtensionAPI) {
 	/** visible 回调每帧记录整个视口宽度：分栏下 footer 收到的宽度已扣掉侧栏，不能再当归属判据 */
 	let splitViewportW = 0;
 
+	/** split 下被搬进右栏的 widget 容器（pi「编辑器上方」的 widget dock，subagent 的 agent 面板就挂在这里） */
+	let dockedWidget: {
+		container: Component;
+		/** 当前所在的父容器（右栏 VStack），重建/还原时先摘下 */
+		curParent: { removeChild(c: Component): void } | null;
+	} | null = null;
+
+	/** 布局树里的父容器（pi 的 dock 是 VStack，entries 与 children 同序对应） */
+	type ContainerParent = {
+		children: Component[];
+		removeChild(c: Component): void;
+		invalidate?(): void;
+		entries?: unknown[];
+	};
+
+	/** 在组件树里找 target 的直接父容器（按 children 数组递归，深度有限） */
+	function findContainerParent(
+		root: unknown,
+		target: unknown,
+		depth = 0,
+	): ContainerParent | null {
+		if (depth > 10 || !root || typeof root !== "object") return null;
+		const children = (root as { children?: unknown }).children;
+		if (!Array.isArray(children)) return null;
+		if (children.includes(target)) return root as ContainerParent;
+		for (const c of children) {
+			const p = findContainerParent(c, target, depth + 1);
+			if (p) return p;
+		}
+		return null;
+	}
+
+	/**
+	 * pi 的「编辑器上方」widget 容器（subagent 的 agent 面板挂在这里）。
+	 * 识别依据：InteractiveMode 按固定顺序把 7 个容器 addChild 到 TUI，children[3] 即它；
+	 * 再要求它确实出现在当前布局树里、且是编辑器容器（children[4]）的前一个兄弟。
+	 * 结构对不上就放弃搬运（dock 留在底部），绝不猜。
+	 */
+	function findWidgetsAbove(tui: TUI, core: Component): Component | null {
+		const candidate = tui.children?.[3];
+		const editor = tui.children?.[4];
+		if (
+			!candidate ||
+			typeof candidate.render !== "function" ||
+			!Array.isArray((candidate as { children?: unknown }).children)
+		)
+			return null;
+		if (!findContainerParent(core, candidate)) return null;
+		// 结构校验：候选必须是编辑器容器的直接前兄弟（pi dock 的固定顺序）
+		if (editor) {
+			const dock = findContainerParent(core, editor);
+			const dc = dock?.children;
+			if (
+				!dc ||
+				dc.indexOf(editor) < 1 ||
+				dc[dc.indexOf(editor) - 1] !== candidate
+			)
+				return null;
+		}
+		return candidate;
+	}
+
+	/**
+	 * 把搬入右栏的 widget 容器插回底部 dock 的原位置（编辑器容器之前）。
+	 * 自愈式还原：不依赖「当时是从哪个父容器摘的」，而是按 pi 的固定结构重新找家，
+	 * reload / 模式切换后旧布局树被丢弃也能正确归位。
+	 */
+	function undockWidgets(core: Component | null): void {
+		const d = dockedWidget;
+		dockedWidget = null;
+		if (!d) return;
+		try {
+			d.curParent?.removeChild(d.container);
+		} catch {
+			// 旧父容器可能已废弃，忽略
+		}
+		try {
+			const tui = activeTui;
+			const editor = tui?.children?.[4];
+			const root = core ?? (tui ? asLayoutRootHost(tui).layoutRoot : undefined);
+			const dock = editor && root ? findContainerParent(root, editor) : null;
+			if (!dock || !editor) return;
+			const idx = Math.max(0, dock.children.indexOf(editor));
+			dock.children.splice(idx, 0, d.container);
+			// Stack 的排版走 entries，必须同步插回（pi 给 widgetsAbove 的原始参数是 shrink:1, minSize:0）
+			if (Array.isArray(dock.entries))
+				dock.entries.splice(idx, 0, {
+					component: d.container,
+					shrink: 1,
+					minSize: 0,
+				});
+			dock.invalidate?.();
+		} catch {
+			// 结构变了就让它留在原处，最多少一块显示，不崩
+		}
+	}
+
 	/**
 	 * 访问 pi-tui alt-screen renderer 的布局根。
 	 * SAFETY: pi-tui 只公开了 `ViewportTUI.setLayoutRoot()`，真正的读写目标是 TS 里标为 private 的
@@ -1680,13 +1796,58 @@ export default function (pi: ExtensionAPI) {
 					splitPanelTheme = theme;
 				}
 				const panel = splitPanel;
+
+				// 把 pi「编辑器上方」的 widget 容器（subagent 的 agent 面板）搬入右栏：
+				// 状态面板在上、agent 面板在下。fullscreen 下鼠标按布局位置命中，
+				// 点击折叠等交互不受影响；结构对不上时静默放弃（留在底部）
+				if (!config.dockWidgetsInSplit && dockedWidget) undockWidgets(core);
+				let rightSide: Component = panel;
+				if (
+					config.dockWidgetsInSplit &&
+					typeof piTuiRuntime.VStack === "function"
+				) {
+					// 重建路径（改宽度 / reload 后重包）：先从旧的右栏摘下
+					if (dockedWidget?.curParent) {
+						try {
+							dockedWidget.curParent.removeChild(dockedWidget.container);
+						} catch {
+							// 旧父容器已废弃，忽略
+						}
+						dockedWidget.curParent = null;
+					}
+					if (!dockedWidget) {
+						const w = findWidgetsAbove(tui, core);
+						const home = w ? findContainerParent(core, w) : null;
+						if (w && home) {
+							home.removeChild(w);
+							dockedWidget = { container: w, curParent: null };
+						}
+					}
+					if (dockedWidget) {
+						const col = new piTuiRuntime.VStack([
+							// panel 取自然高度（docked 时 panelFill 自动让位，见 StatusPanel）
+							{ component: panel, basis: "auto", grow: 0, shrink: 1, minSize: 0 },
+							// agent 面板吃掉剩余高度：内容少时底部留白，内容多时由布局层裁切
+							{
+								component: dockedWidget.container,
+								basis: "auto",
+								grow: 1,
+								shrink: 1,
+								minSize: 0,
+							},
+						]);
+						dockedWidget.curParent = col;
+						rightSide = col;
+					}
+				}
+
 				const wrapper = new piTuiRuntime.HStack(
 					[
 						// basis: 0 + grow: 1 与核心自身的 transcript 写法一致：
 						// 避免布局引擎为测量固有宽度而多渲染一遍整个核心布局（每帧一次全量重排）
 						{ component: core, basis: 0, grow: 1, shrink: 1, minSize: 24 },
 						{
-							component: panel,
+							component: rightSide,
 							basis,
 							grow: 0,
 							shrink: 0,
@@ -1708,10 +1869,12 @@ export default function (pi: ExtensionAPI) {
 				// 不要用 requestRender(true) 整屏清屏，那会闪一下，切换很不丝滑
 				tui.requestRender();
 			} catch {
-				// 布局根不可用（pi 升级改了结构 / 缺 HStack）：静默回退浮层或底部单行
+				// 布局根不可用（pi 升级改了结构 / 缺 HStack）：静默回退浮层或底部单行；
+				// 若 widget 容器已摘下但包装失败，顺手放回底部 dock，避免 agent 面板凭空消失
 				splitWrapper = null;
 				splitCore = null;
 				splitBasis = 0;
+				undockWidgets(core);
 			}
 		});
 	}
@@ -1724,6 +1887,9 @@ export default function (pi: ExtensionAPI) {
 		splitCore = null;
 		splitBasis = 0;
 		splitViewportW = 0;
+		// 先把搬入右栏的 widget 容器插回底部 dock：布局树手术与渲染模式无关，
+		// 不能用下面的 fullscreen 判据提前返回，否则切 regular 后容器会被困在废弃的右栏里
+		undockWidgets(core);
 		if (!wrapper) return;
 		// 只判 mode：这里不需要 HStack（卸载不依赖它），也不能用 splitCapable
 		// 提前返回，否则 wrapper 会永久留在布局树上（reload 后渲染陈旧 ctx → pi 退出）
@@ -1878,7 +2044,7 @@ export default function (pi: ExtensionAPI) {
 		private sel = 0;
 		private cachedW?: number;
 		private cachedLines?: string[];
-		private static readonly ROWS = 6;
+		private static readonly ROWS = 7;
 
 		constructor(
 			private theme: Theme,
@@ -1918,6 +2084,12 @@ export default function (pi: ExtensionAPI) {
 			this.invalidate();
 		}
 
+		/** 切换 agent 面板是否搬进右栏（写回配置，与 /statusbar dock 共用） */
+		private toggleDock(): void {
+			setDockWidgets(!config.dockWidgetsInSplit);
+			this.invalidate();
+		}
+
 		handleInput(data: string): void {
 			for (const seq of splitKeySeqs(data)) this.handleKey(seq);
 		}
@@ -1940,18 +2112,20 @@ export default function (pi: ExtensionAPI) {
 				if (this.sel === 0) return this.cycleLayout(-1);
 				if (this.sel === 1) return this.cycleBorder();
 				if (this.sel === 2) return this.toggleFill();
-				if (this.sel === 3) return this.cycleLang();
+				if (this.sel === 3) return this.toggleDock();
+				if (this.sel === 4) return this.cycleLang();
 			}
 			if (matchesKey(data, "right")) {
 				if (this.sel === 0) return this.cycleLayout(1);
 				if (this.sel === 1) return this.cycleBorder();
 				if (this.sel === 2) return this.toggleFill();
-				if (this.sel === 3) return this.cycleLang();
+				if (this.sel === 3) return this.toggleDock();
+				if (this.sel === 4) return this.cycleLang();
 			}
 			if (matchesKey(data, "return")) {
-				if (this.sel === 4) return this.close("metrics");
-				if (this.sel === 5) return this.close("toggle");
-				return this.close(null); // 布局/边框/填充/语言行：已实时生效，Enter 即完成退出
+				if (this.sel === 5) return this.close("metrics");
+				if (this.sel === 6) return this.close("toggle");
+				return this.close(null); // 布局/边框/填充/入栏/语言行：已实时生效，Enter 即完成退出
 			}
 		}
 
@@ -1964,6 +2138,7 @@ export default function (pi: ExtensionAPI) {
 				T.rowLayout,
 				T.rowBorder,
 				T.rowFill,
+				T.rowDock,
 				T.rowLang,
 				T.rowMetrics,
 				userWants ? T.rowDisable : T.rowEnable,
@@ -2012,24 +2187,38 @@ export default function (pi: ExtensionAPI) {
 					width,
 				),
 			);
-			// 行 3：语言
+			// 行 3：Agent 面板入栏（只影响 layout=split；其余布局 dock 本来就在底部）
 			lines.push(
 				menuRow(
 					th,
 					this.sel === 3,
 					labels[3],
-					adjustable(this.sel === 3, LANG_LABELS[config.language]),
+					adjustable(
+						this.sel === 3,
+						config.dockWidgetsInSplit ? T.dockIn : T.dockOut,
+					),
 					labelCol,
 					width,
 				),
 			);
-			// 行 4：指标显隐（显示计数）
-			const hiddenCount = config.hiddenMetrics.length;
+			// 行 4：语言
 			lines.push(
 				menuRow(
 					th,
 					this.sel === 4,
 					labels[4],
+					adjustable(this.sel === 4, LANG_LABELS[config.language]),
+					labelCol,
+					width,
+				),
+			);
+			// 行 5：指标显隐（显示计数）
+			const hiddenCount = config.hiddenMetrics.length;
+			lines.push(
+				menuRow(
+					th,
+					this.sel === 5,
+					labels[5],
 					th.fg(
 						hiddenCount ? "warning" : "muted",
 						T.metricsCount(METRICS.length - hiddenCount, METRICS.length),
@@ -2038,8 +2227,8 @@ export default function (pi: ExtensionAPI) {
 					width,
 				),
 			);
-			// 行 5：启用/停用
-			lines.push(menuRow(th, this.sel === 5, labels[5], "", labelCol, width));
+			// 行 6：启用/停用
+			lines.push(menuRow(th, this.sel === 6, labels[6], "", labelCol, width));
 			lines.push("");
 			lines.push(truncateToWidth(`  ${th.fg("dim", T.menuHint)}`, width));
 			lines.push("");
@@ -2360,6 +2549,46 @@ export default function (pi: ExtensionAPI) {
 		setPanelFill(on, (msg, type) => ctx.ui.notify(msg, type));
 	}
 
+	/**
+	 * 切换 split 下是否把 agent 面板（pi「编辑器上方」widget 容器）搬进右栏。
+	 * 写回配置；分栏已装好时会拆掉重装（搬入/还原立即生效），其余布局记住设置即可。
+	 */
+	function setDockWidgets(
+		on: boolean,
+		notify?: (msg: string, type: "info" | "warning") => void,
+	): void {
+		const T = t();
+		if (config.dockWidgetsInSplit === on) {
+			notify?.(`Agent 面板入栏已是「${on ? T.dockIn : T.dockOut}」`, "info");
+			return;
+		}
+		config.dockWidgetsInSplit = on;
+		try {
+			saveConfigPatch({ dockWidgetsInSplit: on });
+		} catch {
+			// 写入失败不影响本次会话内的显示
+		}
+		if (layoutMode === "split" && activeTui && splitWrapper) {
+			closeSplit(); // 关掉时 undock 回底部；开启时由下一帧 ensureSplit 重新搬入
+			try {
+				activeTui.requestRender();
+			} catch {
+				// TUI 已销毁，忽略
+			}
+		}
+		notify?.(
+			`Agent 面板: ${on ? T.dockIn : T.dockOut}` +
+				(layoutMode === "split" ? "" : "（仅 layout=split 生效）"),
+			"info",
+		);
+	}
+
+	/** /statusbar dock 子命令入口（无参数 = 取反） */
+	function applyDock(ctx: ExtensionContext, arg: string | undefined): void {
+		const on = arg ? arg === "on" : !config.dockWidgetsInSplit;
+		setDockWidgets(on, (msg, type) => ctx.ui.notify(msg, type));
+	}
+
 	/** 切换自定义状态栏 / 内置 footer */
 	function toggleStatusbar(ctx: ExtensionContext): void {
 		if (userWants) {
@@ -2431,7 +2660,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("statusbar", {
 		description:
-			"状态栏设置：无参数打开交互菜单；子命令 on/off | layout [right|bottom|auto|split] | split [on|off] | border [auto|unicode|ascii] | fill [on|off] | metrics | quota | prices",
+			"状态栏设置：无参数打开交互菜单；子命令 on/off | layout [right|bottom|auto|split] | split [on|off] | border [auto|unicode|ascii] | fill [on|off] | dock [on|off] | metrics | quota | prices",
 		handler: async (args, ctx) => {
 			const parts = args.trim().toLowerCase().split(/\s+/).filter(Boolean);
 			const sub = parts[0];
@@ -2485,6 +2714,15 @@ export default function (pi: ExtensionAPI) {
 				applyPanelFill(ctx, a);
 				return;
 			}
+			if (sub === "dock") {
+				const a = parts[1];
+				if (a && a !== "on" && a !== "off") {
+					ctx.ui.notify(`无效参数: ${a}（可选 on / off）`, "warning");
+					return;
+				}
+				applyDock(ctx, a);
+				return;
+			}
 			if (sub === "metrics") {
 				await runMetricsPicker(ctx);
 				return;
@@ -2499,7 +2737,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (sub) {
 				ctx.ui.notify(
-					`未知子命令: ${sub}。用法: /statusbar [on|off|layout [right|bottom|auto|split]|split [on|off]|border [auto|unicode|ascii]|fill [on|off]|metrics|quota|prices]，或无参数打开交互菜单`,
+					`未知子命令: ${sub}。用法: /statusbar [on|off|layout [right|bottom|auto|split]|split [on|off]|border [auto|unicode|ascii]|fill [on|off]|dock [on|off]|metrics|quota|prices]，或无参数打开交互菜单`,
 					"warning",
 				);
 				return;
