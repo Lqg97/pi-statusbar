@@ -16,6 +16,12 @@ main │ ↑12.3k ↓45.6k ⚡100k·85% $0.123 ⏱980ms 128 tok/s │ ▰▰▰�
   - Kimi（api.kimi.com）→ 短窗口/周配额百分比 + 恢复倒计时
   - DeepSeek（deepseek.com）→ 按量账户余额（按量计费，无重置概念）
   - OpenRouter（openrouter.ai）→ 剩余 credits（按量计费，无重置概念）
+  - OpenCode Go（opencode.ai/zen/go）→ 5h/周/月三窗口已用百分比 + 恢复倒计时
+  - MiniMax Coding Plan（minimaxi.com / minimax.io）→ 5h/周窗口已用百分比 + 恢复倒计时
+  - Moonshot 开放平台（api.moonshot.cn/.ai）→ 按量账户余额（按量计费，无重置概念）
+  - SiliconFlow（siliconflow.cn/.com）→ 按量账户余额（按量计费，无重置概念）
+  - StepFun（stepfun.com/.ai）→ 按量账户余额（按量计费，无重置概念）
+  - Novita AI（novita.ai）→ 按量账户余额（按量计费，无重置概念）
   - 每个窗口用量后括注恢复倒计时（`45s` / `13m` / `2h13m` / `6d4h`：不足 24h 按 `xhyym`，超 24h 按 `xdyyh`，渲染时按重置时刻实时换算，时刻缺失则不显示）；底部单行各窗口用 `·` 连接，右侧面板逐窗口分行
   - `/statusbar quota` 强制刷新并显示详情（含各窗口「重置于 2026-09-15 15:45（3h56m）」）
 

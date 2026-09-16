@@ -14,6 +14,12 @@
  *     Kimi（api.kimi.com）                       → 短窗口/周配额百分比 + 恢复倒计时
  *     DeepSeek 余额（deepseek.com）              → 按量账户余额（无重置概念）
  *     OpenRouter 额度（openrouter.ai）           → 剩余 credits（无重置概念）
+ *     OpenCode Go（opencode.ai/zen/go）          → 5h/周/月三窗口已用百分比 + 恢复倒计时
+ *     MiniMax Coding Plan（minimaxi.com / minimax.io）→ 5h/周窗口已用百分比 + 恢复倒计时
+ *     Moonshot 开放平台（api.moonshot.cn/.ai）   → 按量账户余额（无重置概念）
+ *     SiliconFlow（siliconflow.cn/.com）         → 按量账户余额（无重置概念）
+ *     StepFun（stepfun.com/.ai）                 → 按量账户余额（无重置概念）
+ *     Novita AI（novita.ai）                     → 按量账户余额（无重置概念）
  *   每个窗口用量后括注 (恢复倒计时)（45s/13m/2h13m/6d4h；不足 24h 按 xhyym，超 24h 按 xdyyh，渲染时按重置时刻实时换算）；
  *   底部单行各窗口用 · 连接，右侧面板逐窗口分行；带 TTL 缓存，失败静默；/statusbar quota 强制刷新并显示详情
  * - /exit 为 /quit 的别名，优雅退出 pi
@@ -713,6 +719,219 @@ const QUOTA_SOURCES: QuotaSource[] = [
 					maxPercent: total > 0 ? (used / total) * 100 : undefined,
 				},
 				detail: `OpenRouter 已用 $${used.toFixed(2)} / $${total.toFixed(2)}`,
+			};
+		},
+	},
+	{
+		id: "OpenCode Go",
+		// Go 订阅（$10/月，$12/5h、$30/周、$60/月三窗口）。Zen 按量版（/zen/v1）
+		// 没有用量 API（实测 404），故只匹配 /zen/go，刻意不含纯 opencode.ai。
+		match: /opencode\.ai\/zen\/go/,
+		ttlMs: 5 * 60_000,
+		async fetch(_origin, apiKey) {
+			// 用量端点固定在 /zen/go/v1/usage，且只认 Bearer——与推理侧 /messages
+			// 只认 x-api-key 正好相反，不能互换（参照 cc-switch coding_plan.rs 实测结论）。
+			const res = await fetch("https://opencode.ai/zen/go/v1/usage", {
+				headers: {
+					Authorization: `Bearer ${apiKey}`,
+					Accept: "application/json",
+				},
+				signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+			});
+			// 403：key 有效（Zen 与 Go 共用同一把 workspace key）但该账号无 Go 订阅
+			if (res.status === 403)
+				return {
+					seg: null,
+					detail: "API key 有效，但该账号未订阅 OpenCode Go（HTTP 403）",
+				};
+			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			const json: any = await res.json();
+			const usage = json?.usage;
+			if (!usage) return { seg: null, detail: "响应中无 usage 数据" };
+
+			// 未文档化端点（上线后改过形态），逐窗口防御解析：percent 为已用整数百分比，
+			// status=="rate-limited" 时上游已把 percent 钉在 100；
+			// percent=0 时 resetsAt 是「now+窗口」占位值，丢弃不展示倒计时。
+			const WINDOWS: [string, string][] = [
+				["rolling", "5h"],
+				["weekly", "周"],
+				["monthly", "月"],
+			];
+			const parts: string[] = [];
+			const rows: QuotaRow[] = [];
+			let maxPercent: number | undefined;
+			for (const [key, label] of WINDOWS) {
+				const pct = parseFloat(usage[key]?.percent);
+				if (!Number.isFinite(pct)) continue;
+				const at = pct > 0 ? toResetAt(usage[key].resetsAt) : undefined;
+				const text = withReset(`${label} ${Math.round(pct)}%`, at);
+				parts.push(text);
+				rows.push({ text, percent: pct });
+				maxPercent = Math.max(maxPercent ?? 0, pct);
+			}
+			if (parts.length === 0)
+				return { seg: null, detail: "响应形态不认识（端点可能再次变更）" };
+
+			let detail = "OpenCode Go";
+			for (const [key, label] of WINDOWS) {
+				const w = usage[key];
+				const pct = parseFloat(w?.percent);
+				if (!Number.isFinite(pct)) continue;
+				detail += `\n  ${label} 窗口: 已用 ${Math.round(pct)}%${w?.status === "rate-limited" ? "（限流中）" : ""}${pct > 0 ? resetDetail(toResetAt(w?.resetsAt)) : ""}`;
+			}
+			return {
+				seg: { text: `OC ${parts.join("·")}`, rows, maxPercent },
+				detail,
+			};
+		},
+	},
+	{
+		id: "MiniMax",
+		match: /minimaxi\.com|minimax\.io/,
+		ttlMs: 5 * 60_000,
+		async fetch(origin, apiKey) {
+			// 新路径 /v1/token_plan/remains；旧的 /v1/api/openplatform/coding_plan/remains
+			// 已废弃（会落到要 cookie 的页面报错），国内 api.minimaxi.com / 国际 api.minimax.io 同构。
+			const res = await fetch(`${origin}/v1/token_plan/remains`, {
+				headers: { Authorization: `Bearer ${apiKey}` },
+				signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+			});
+			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			const json: any = await res.json();
+			const base = json?.base_resp;
+			if (base && base.status_code !== 0)
+				return {
+					seg: null,
+					detail: `API error (${base.status_code}): ${base.status_msg ?? "Unknown"}`,
+				};
+			const remains: any[] = json?.model_remains ?? [];
+			// 编程套餐条目：国际站 model_name 为 "general"，国内站为具体模型名（minimax-m*）；
+			// video 等非编程模型跳过
+			const item =
+				remains.find((r) => r?.model_name === "general") ??
+				remains.find(
+					(r) =>
+						typeof r?.model_name === "string" && !r.model_name.includes("video"),
+				);
+			if (!item)
+				return {
+					seg: null,
+					detail: "响应中无编程套餐额度（可能未订阅 Coding Plan）",
+				};
+
+			// 接口给的是「剩余百分比」，与其他源统一成已用百分比展示
+			const parts: string[] = [];
+			const rows: QuotaRow[] = [];
+			let maxPercent: number | undefined;
+			let detail = "MiniMax Coding Plan";
+			const push = (label: string, remainPct: unknown, endMs: unknown) => {
+				const remain = parseFloat(remainPct as string);
+				if (!Number.isFinite(remain)) return;
+				const pct = 100 - remain;
+				const at = toResetAt(endMs);
+				const text = withReset(`${label} ${Math.round(pct)}%`, at);
+				parts.push(text);
+				rows.push({ text, percent: pct });
+				maxPercent = Math.max(maxPercent ?? 0, pct);
+				detail += `\n  ${label} 窗口: 剩余 ${Math.round(remain)}%${resetDetail(at)}`;
+			};
+			push("5h", item.current_interval_remaining_percent, item.end_time);
+			// 周桶仅当 current_weekly_status===1 时激活（无周限额的套餐该字段为 3，剩余恒 100，不应展示）
+			if (item.current_weekly_status === 1)
+				push("周", item.current_weekly_remaining_percent, item.weekly_end_time);
+			if (parts.length === 0)
+				return { seg: null, detail: "响应中无可解析的额度窗口" };
+			return {
+				seg: { text: `MM ${parts.join("·")}`, rows, maxPercent },
+				detail,
+			};
+		},
+	},
+	{
+		id: "Moonshot",
+		// 开放平台按量余额（api.moonshot.cn / .ai），与 Kimi Coding（api.kimi.com）是两套
+		match: /api\.moonshot\.(cn|ai)/,
+		ttlMs: 10 * 60_000,
+		async fetch(origin, apiKey) {
+			const res = await fetch(`${origin}/v1/users/me/balance`, {
+				headers: { Authorization: `Bearer ${apiKey}` },
+				signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+			});
+			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			const json: any = await res.json();
+			const data = json?.data;
+			const avail = parseFloat(data?.available_balance);
+			if (!Number.isFinite(avail))
+				return { seg: null, detail: "响应中无余额信息" };
+			const symbol = origin.includes(".cn") ? "¥" : "$";
+			let detail = `Moonshot 余额 ${symbol}${avail.toFixed(2)}`;
+			if (parseFloat(data?.voucher_balance) > 0)
+				detail += `（代金券 ${symbol}${data.voucher_balance}）`;
+			return { seg: { text: `MS ${symbol}${avail.toFixed(1)}` }, detail };
+		},
+	},
+	{
+		id: "SiliconFlow",
+		match: /siliconflow\.(cn|com)/,
+		ttlMs: 10 * 60_000,
+		async fetch(origin, apiKey) {
+			const res = await fetch(`${origin}/v1/user/info`, {
+				headers: { Authorization: `Bearer ${apiKey}` },
+				signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+			});
+			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			const json: any = await res.json();
+			const data = json?.data;
+			const total = parseFloat(data?.totalBalance);
+			if (!Number.isFinite(total))
+				return { seg: null, detail: "响应中无余额信息" };
+			// .cn 人民币 / .com 美元；chargeBalance 充值、balance 赠送
+			const symbol = origin.includes(".cn") ? "¥" : "$";
+			let detail = `SiliconFlow 余额 ${symbol}${total.toFixed(2)}`;
+			if (parseFloat(data?.balance) > 0)
+				detail += `（赠送 ${symbol}${data.balance}）`;
+			return { seg: { text: `SF ${symbol}${total.toFixed(1)}` }, detail };
+		},
+	},
+	{
+		id: "StepFun",
+		match: /stepfun\.(com|ai)/,
+		ttlMs: 10 * 60_000,
+		async fetch(origin, apiKey) {
+			// 响应：{ object, type, balance, total_cash_balance, total_voucher_balance }
+			const res = await fetch(`${origin}/v1/accounts`, {
+				headers: { Authorization: `Bearer ${apiKey}` },
+				signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+			});
+			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			const json: any = await res.json();
+			const balance = parseFloat(json?.balance);
+			if (!Number.isFinite(balance))
+				return { seg: null, detail: "响应中无余额信息" };
+			let detail = `StepFun 余额 ¥${balance.toFixed(2)}`;
+			if (parseFloat(json?.total_voucher_balance) > 0)
+				detail += `（代金券 ¥${json.total_voucher_balance}）`;
+			return { seg: { text: `Step ¥${balance.toFixed(1)}` }, detail };
+		},
+	},
+	{
+		id: "Novita",
+		match: /novita\.ai/,
+		ttlMs: 10 * 60_000,
+		async fetch(origin, apiKey) {
+			const res = await fetch(`${origin}/v3/user/balance`, {
+				headers: { Authorization: `Bearer ${apiKey}` },
+				signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+			});
+			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			const json: any = await res.json();
+			// 金额单位为 0.0001 USD，需除以 10000
+			const raw = parseFloat(json?.availableBalance);
+			if (!Number.isFinite(raw)) return { seg: null, detail: "响应中无余额信息" };
+			const avail = raw / 10000;
+			return {
+				seg: { text: `NV $${avail.toFixed(1)}` },
+				detail: `Novita 余额 $${avail.toFixed(2)}`,
 			};
 		},
 	},
