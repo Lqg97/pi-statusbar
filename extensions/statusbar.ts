@@ -1729,10 +1729,7 @@ export default function (pi: ExtensionAPI) {
 					th,
 					this.sel === 2,
 					labels[2],
-					adjustable(
-						this.sel === 2,
-						config.panelFill ? T.fillOn : T.fillOff,
-					),
+					adjustable(this.sel === 2, config.panelFill ? T.fillOn : T.fillOff),
 					labelCol,
 					width,
 				),
@@ -2080,10 +2077,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/** /statusbar fill 子命令入口（无参数 = 取反） */
-	function applyPanelFill(
-		ctx: ExtensionContext,
-		arg: string | undefined,
-	): void {
+	function applyPanelFill(ctx: ExtensionContext, arg: string | undefined): void {
 		const on = arg ? arg === "on" : !config.panelFill;
 		setPanelFill(on, (msg, type) => ctx.ui.notify(msg, type));
 	}
@@ -2159,7 +2153,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("statusbar", {
 		description:
-		"状态栏设置：无参数打开交互菜单；子命令 on/off | layout [right|bottom|auto|split] | split [on|off] | border [auto|unicode|ascii] | fill [on|off] | metrics | quota | prices",
+			"状态栏设置：无参数打开交互菜单；子命令 on/off | layout [right|bottom|auto|split] | split [on|off] | border [auto|unicode|ascii] | fill [on|off] | metrics | quota | prices",
 		handler: async (args, ctx) => {
 			const parts = args.trim().toLowerCase().split(/\s+/).filter(Boolean);
 			const sub = parts[0];
