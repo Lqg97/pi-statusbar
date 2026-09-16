@@ -8,6 +8,8 @@
  *
  * - 花费按实时单价计算：session 启动时从 models.dev/api.json 拉取各家官方单价（本地缓存 24h），
  *   失败时回落 models.json 的 cost 字段；/statusbar prices 强制刷新并显示当前模型单价来源
+ *   计价按「每条 assistant 消息自己的模型」逐条进行，会话中途切换模型不会把历史轮次
+ *   按新模型单价重算；阶梯定价也按单次请求判定（与 pi-ai 的 calculateCost 一致）
  * - 上下文占用 ≥75% 变黄，≥90% 变红
  * - 订阅额度自动发现（按 provider baseUrl 匹配，只显示当前模型所属 provider 的额度）：
  *     GLM Coding Plan（bigmodel.cn / z.ai）      → 5h/周 token 窗口百分比 + 恢复倒计时
@@ -51,7 +53,11 @@
  *   未配置 priceMap 时按模型 id 在 models.dev 全量中自动匹配（同名取最便宜），零配置可用；
  *   配置在新会话时重读，改完开新会话即生效
  */
-import type { AssistantMessage, ModelCost } from "@earendil-works/pi-ai";
+import type {
+	AssistantMessage,
+	ModelCost,
+	ModelCostRates,
+} from "@earendil-works/pi-ai";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
@@ -82,6 +88,8 @@ interface UsageStats {
 	output: number;
 	cacheRead: number;
 	cacheWrite: number;
+	/** cacheWrite 中用 1h 保留期写入的部分（Anthropic 按 2× input 计费） */
+	cacheWrite1h: number;
 	cost: number;
 }
 
@@ -955,6 +963,7 @@ export default function (pi: ExtensionAPI) {
 		output: 0,
 		cacheRead: 0,
 		cacheWrite: 0,
+		cacheWrite1h: 0,
 		cost: 0,
 	};
 	// 首 token 耗时（TTFT）：before_provider_request 到首个 assistant message_start
@@ -1145,29 +1154,52 @@ export default function (pi: ExtensionAPI) {
 		return priceTable[`${model.provider}:${model.id}`] ?? (model as any)?.cost;
 	}
 
-	/** 按单价计算花费（含阶梯定价，逻辑与 pi-ai 的 calculateCost 一致） */
-	function calcCost(rates: ModelCost | undefined, u: UsageStats): number {
-		if (!rates) return u.cost;
-		let r: any = rates;
+	/** 单条消息的用量切片：阶梯定价按单次请求判定，所以计价的最小单位是「一条消息」 */
+	type UsageSlice = Pick<
+		UsageStats,
+		"input" | "output" | "cacheRead" | "cacheWrite"
+	> & { cacheWrite1h?: number };
+
+	/**
+	 * 按单价计算花费（含阶梯定价与 1h 缓存写，逻辑与 pi-ai 的 calculateCost 一致）。
+	 * rates 为空时返回 fallback（pi 自己算好的 usage.cost.total）。
+	 */
+	function calcCost(
+		rates: ModelCost | undefined,
+		u: UsageSlice,
+		fallback: number,
+	): number {
+		if (!rates) return fallback;
+		let r: ModelCostRates = rates;
+		// 阶梯定价按「本次请求」的输入总量判定，不是会话累计量
 		const inputTokens = u.input + u.cacheRead + u.cacheWrite;
 		let matched = -1;
-		for (const t of (rates as any).tiers ?? []) {
+		for (const t of rates.tiers ?? []) {
 			if (inputTokens > t.inputTokensAbove && t.inputTokensAbove > matched) {
 				r = t;
 				matched = t.inputTokensAbove;
 			}
 		}
+		// Anthropic 的 1h 缓存写按 2× input 计费，其余按 cacheWrite 单价
+		const longWrite = Math.min(u.cacheWrite1h ?? 0, u.cacheWrite);
+		const shortWrite = u.cacheWrite - longWrite;
 		return (
 			(r.input / 1_000_000) * u.input +
 			(r.output / 1_000_000) * u.output +
 			(r.cacheRead / 1_000_000) * u.cacheRead +
-			(r.cacheWrite / 1_000_000) * u.cacheWrite
+			((r.cacheWrite ?? 0) * shortWrite + (r.input ?? 0) * 2 * longWrite) /
+				1_000_000
 		);
 	}
 
 	// ---------- 会话用量 ----------
 
-	/** 汇总当前分支上全部 assistant 消息的用量（含工具内部调用） */
+	/**
+	 * 汇总当前分支上全部 assistant 消息的用量（含工具内部调用）。
+	 * 花费逐条计价：每条消息用它自己的 provider:model 对应单价重算（查不到则用 pi 算好的
+	 * usage.cost.total），因此会话中途切换模型时历史轮次不会被新模型单价重算，
+	 * 长短上下文混用的会话也不会被会话级累计量错误抬价。
+	 */
 	function computeUsage(ctx: ExtensionContext): UsageStats {
 		const branch = ctx.sessionManager.getBranch();
 		const key = `${ctx.sessionManager.getSessionId()}:${branch.length}:${branch.at(-1)?.id ?? ""}:${priceStamp}`;
@@ -1178,23 +1210,28 @@ export default function (pi: ExtensionAPI) {
 			output: 0,
 			cacheRead: 0,
 			cacheWrite: 0,
+			cacheWrite1h: 0,
 			cost: 0,
 		};
 		for (const e of branch) {
-			if (e.type === "message" && e.message.role === "assistant") {
-				const usage = (e.message as AssistantMessage).usage;
-				stats.input += usage?.input ?? 0;
-				stats.output += usage?.output ?? 0;
-				stats.cacheRead += usage?.cacheRead ?? 0;
-				stats.cacheWrite += usage?.cacheWrite ?? 0;
-				stats.cost += usage?.cost?.total ?? 0;
-			}
+			if (e.type !== "message" || e.message.role !== "assistant") continue;
+			const msg = e.message as AssistantMessage;
+			const usage = msg.usage;
+			if (!usage) continue;
+			stats.input += usage.input ?? 0;
+			stats.output += usage.output ?? 0;
+			stats.cacheRead += usage.cacheRead ?? 0;
+			stats.cacheWrite += usage.cacheWrite ?? 0;
+			stats.cacheWrite1h += usage.cacheWrite1h ?? 0;
+			// 产生这条消息的模型：消息自带 provider/model，单价表按同一个键取
+			const rates =
+				msg.provider && msg.model
+					? priceTable[`${msg.provider}:${msg.model}`]
+					: undefined;
+			stats.cost += calcCost(rates, usage, usage.cost?.total ?? 0);
 		}
-		// 有实时单价时按实时价重算花费，否则沿用 pi 基于 models.json 的结果
-		const rates = ratesFor(ctx);
-		const cost = calcCost(rates, stats);
 		cacheKey = key;
-		cachedUsage = { ...stats, cost };
+		cachedUsage = stats;
 		return cachedUsage;
 	}
 
@@ -2544,7 +2581,7 @@ export default function (pi: ExtensionAPI) {
 		updateTitle(ctx);
 		void refreshPrices(ctx, false);
 	});
-	// 切换模型后重绘：触发新 provider 额度段显示与首次拉取，并按新模型单价重算花费
+	// 切换模型后重绘：触发新 provider 额度段显示与首次拉取；用量缓存作废后按逐条消息单价重算
 	pi.on("model_select", async (_event, ctx) => {
 		currentCtx = ctx;
 		cacheKey = "";
