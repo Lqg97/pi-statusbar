@@ -126,6 +126,20 @@ regular 模式下选 `split` 不会报错，而是退回底部单行、且**不�
 - 花费计算含阶梯定价，逻辑与 pi-ai 的 `calculateCost` 一致
 - 生成中的 tok/s 按字符估算（英文 ~4 字符/token，CJK ~1.5 字符/token），带 `~` 前缀；响应结束后显示精确值
 
+## 排障
+
+### 右侧面板边框在不同行「错位」（半格左右的偏移，不是整格）
+
+这是终端渲染器的问题，与扩展无关，但有一条已验证的修法：
+
+- 触发条件：VSCode / Cursor 内置终端把 `terminal.integrated.gpuAcceleration` 设为 `"off"` 时用的是 **DOM 渲染器**，它逐行按文本排版，会对字体回退字形（emoji、`▰▱` 这类符号）做 letter-spacing 补偿 —— 行内地基偏一点，整行后面所有格子跟着偏。`split`（右侧分栏）下边框和聊天内容在同一行字符串里，于是边框跟着偏；浮层布局下看不明显。
+- 修法：把 `"terminal.integrated.gpuAcceleration"` 改回 **`"auto"`**（或 `"on"`）用 WebGL 渲染器；`Cmd+Q` 完全退出、新开终端后生效。
+- 验证：`/statusbar layout split` 下聊几轮（让聊天区出现 emoji/特殊符号），边框应全程笔直。
+
+### 面板边框字符集
+
+`panelBorder` 默认 `"auto"`（等价 `unicode`），需要时可切 `"ascii"`（`+ - |`），或用 `/statusbar border ascii`、环境变量 `PI_STATUSBAR_BORDER=ascii` 覆盖。
+
 ## 安全提示
 
 pi 扩展以完整系统权限运行。安装前请审阅 [extensions/statusbar.ts](extensions/statusbar.ts) 源码（仅有的网络请求：models.dev 单价接口与各 provider 官方额度接口）。

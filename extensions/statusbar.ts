@@ -156,7 +156,9 @@ type Lang = "zh" | "en";
  *  unicode = ┌─┐│└┘；ascii = + - | 。
  *  为什么留 ascii：个别终端对 U+2500 段方框字符的处理确实会出问题，作为可手动切的后路。
  *  注意：实测 ascii 并不能修复「行内排版漂移」那类残影（错位来自终端渲染器本身，
- *  与方框字形无关），所以不再按 TERM_PROGRAM 自动猜。 */
+ *  与方框字形无关）。已验证的修法：VSCode / Cursor 内置终端把
+ *  terminal.integrated.gpuAcceleration 从 "off"（DOM 渲染器）改回 "auto"/"on"（WebGL）；
+ *  详见 README 的「排障」一节。 */
 type PanelBorder = "auto" | "unicode" | "ascii";
 
 /** 可配置显隐的指标 */
