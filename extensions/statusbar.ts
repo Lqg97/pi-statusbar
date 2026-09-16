@@ -190,7 +190,12 @@ const METRICS: { key: MetricKey; zh: string; en: string }[] = [
 const LAYOUT_ORDER: LayoutMode[] = ["auto", "bottom", "right", "split"];
 const LAYOUT_LABELS: Record<Lang, Record<LayoutMode, string>> = {
 	zh: { auto: "自动", bottom: "底部单行", right: "右侧浮层", split: "右侧分栏" },
-	en: { auto: "Auto", bottom: "Bottom", right: "Right overlay", split: "Right column" },
+	en: {
+		auto: "Auto",
+		bottom: "Bottom",
+		right: "Right overlay",
+		split: "Right column",
+	},
 };
 const LANG_LABELS: Record<Lang, string> = { zh: "中文", en: "English" };
 
@@ -1307,14 +1312,14 @@ export default function (pi: ExtensionAPI) {
 								// 于是留下半旧半新的错位残影（用户反馈的“不对齐”）
 								margin: { right: 0 },
 								nonCapturing: true,
-							visible: (w: number) =>
-								userWants &&
-								panelAlive &&
-								// 进分栏的过渡帧：分栏还没装好就先把浮层顶住，避免面板闪掉一帧；
-								// 装好了（或本来就未在切分栏）就按普通规则：只在该显示浮层时可见
-								(layoutMode === "split"
-									? !(activeTui && splitInstalled(activeTui))
-									: panelActive(w)),
+								visible: (w: number) =>
+									userWants &&
+									panelAlive &&
+									// 进分栏的过渡帧：分栏还没装好就先把浮层顶住，避免面板闪掉一帧；
+									// 装好了（或本来就未在切分栏）就按普通规则：只在该显示浮层时可见
+									(layoutMode === "split"
+										? !(activeTui && splitInstalled(activeTui))
+										: panelActive(w)),
 							}),
 						},
 					)
