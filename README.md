@@ -1,6 +1,10 @@
 # pi-statusbar
 
+[![npm](https://img.shields.io/npm/v/@qinggangli/pi-statusbar)](https://www.npmjs.com/package/@qinggangli/pi-statusbar)
+
 [pi](https://github.com/badlogic/pi-mono) 自定义状态栏扩展：展示 git 分支、token 用量、实时花费、首 token 耗时、输出吞吐、上下文占用与订阅额度。
+
+> npm 包名是 **`@qinggangli/pi-statusbar`**（带 scope）。裸名 `pi-statusbar` 被 npm 以“Package name too similar to existing package `pi-status-bar`”拒绝——那个是 pi 官方发的同类扩展，不是本仓库。在 npm 搜 `pi-statusbar` 也能搜到本包。
 
 ```text
 main │ ↑12.3k ↓45.6k ⚡100k·85% $0.123 ⏱980ms 128 tok/s │ ▰▰▰▱▱▱▱▱▱▱ 23% │ GLM 5h 12%(3h56m)·1周 34%(6d10h) │ glm-5.3·high │ LSP Active
