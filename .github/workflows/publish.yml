@@ -92,13 +92,29 @@ jobs:
                       `unpacked ${kb(p.unpackedSize)} kB`);
           '
 
+      - name: 检查该版本是否已发布
+        id: published
+        run: |
+          PKG="$(node -p "require('./package.json').version")"
+          if npm view "pi-statusbar@$PKG" version >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::pi-statusbar@$PKG 已在 registry 上"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "pi-statusbar@$PKG 尚未发布"
+          fi
+
       - name: 发布到 npm
         env:
           DRY_RUN: ${{ inputs.dry_run }}
+          SKIP: ${{ steps.published.outputs.skip }}
         run: |
           if [ "$DRY_RUN" = "true" ]; then
             echo "dry-run：只校验，不发布"
             npm publish --dry-run
+          elif [ "$SKIP" = "true" ]; then
+            # 幂等：同一版本重推 tag / 重跑 workflow 不应报错
+            echo "该版本已存在，跳过发布"
           else
             # Trusted Publishing 下 provenance 自动生成，无需 --provenance
             npm publish
