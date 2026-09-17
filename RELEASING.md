@@ -6,6 +6,8 @@
 
 ## 一次性：首次发布（必须手动）
 
+> 账号对照：npm 是 **`qinggangli`**，GitHub 是 **`Lqg97`**，两者不同名——下面每一步要填哪个别搞混。
+
 npm 的 Trusted Publishing（OIDC）**不能用于首次发布**：包必须先存在于 registry，包设置页才会出现 Trusted Publisher 配置项。npm 官方文档至今没写这个场景（[npm/documentation#1926](https://github.com/npm/documentation/issues/1926) 仍未关闭，多位用户确认首次 OIDC 发布会失败、只能手动补第一次）。所以第一次老老实实手动发：
 
 ```bash
@@ -58,6 +60,7 @@ npmjs.com → 你的包 → **Settings** → **Trusted publishing** → GitHub A
 
 | 字段 | 值 |
 | --- | --- |
+| Organization or user | `Lqg97` ← **GitHub 账号**，不是 npm 账号 |
 | Organization or user | `Lqg97` |
 | Repository | `pi-statusbar` |
 | Workflow filename | `publish.yml`（只填文件名、含 `.yml`） |
