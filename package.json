@@ -1,14 +1,23 @@
 {
 	"name": "@qinggangli/pi-statusbar",
-	"version": "1.0.1",
+	"version": "1.0.2",
 	"description": "pi 自定义状态栏：git 分支 / token 用量 / 实时花费 / TTFT / tok/s / 上下文占用 / 订阅额度",
-	"keywords": ["pi-package", "pi", "statusbar", "footer"],
+	"keywords": [
+		"pi-package",
+		"pi",
+		"statusbar",
+		"footer"
+	],
 	"license": "MIT",
 	"repository": {
 		"type": "git",
 		"url": "git+https://github.com/Lqg97/pi-statusbar.git"
 	},
-	"files": ["extensions", "README.md", "LICENSE"],
+	"files": [
+		"extensions",
+		"README.md",
+		"LICENSE"
+	],
 	"publishConfig": {
 		"access": "public"
 	},
@@ -18,11 +27,19 @@
 		"@earendil-works/pi-tui": "*"
 	},
 	"peerDependenciesMeta": {
-		"@earendil-works/pi-ai": { "optional": true },
-		"@earendil-works/pi-coding-agent": { "optional": true },
-		"@earendil-works/pi-tui": { "optional": true }
+		"@earendil-works/pi-ai": {
+			"optional": true
+		},
+		"@earendil-works/pi-coding-agent": {
+			"optional": true
+		},
+		"@earendil-works/pi-tui": {
+			"optional": true
+		}
 	},
 	"pi": {
-		"extensions": ["./extensions"]
+		"extensions": [
+			"./extensions"
+		]
 	}
 }
