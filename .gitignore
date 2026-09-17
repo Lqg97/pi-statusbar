@@ -3,3 +3,6 @@ node_modules/
 .DS_Store
 # 本地计划/草稿产物（plan skill）
 .omc/
+
+# 本地 pi 后台任务产物（bg_run / bg_delegate 输出）
+.pi/tasks/
