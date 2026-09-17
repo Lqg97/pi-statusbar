@@ -1,0 +1,76 @@
+name: publish
+
+# 打 tag 即发布：git tag v1.0.1 && git push origin v1.0.1
+# 首次发布或补发可在 Actions 页面手动触发（需先把 ref 选成已有的 tag）。
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "只打包校验，不真正发布"
+        type: boolean
+        default: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # npm provenance 需要
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: 校验 ref 是 tag
+        run: |
+          case "$GITHUB_REF" in
+            refs/tags/*) echo "tag: $GITHUB_REF_NAME" ;;
+            *) echo "::error::必须在 tag 上运行（当前 $GITHUB_REF），否则版本号校验无意义"; exit 1 ;;
+          esac
+
+      - name: 校验 tag 与 package.json version 一致
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::tag $GITHUB_REF_NAME 与 package.json version $PKG 不一致（npm 不允许重复发布同一版本，必须先对齐）"
+            exit 1
+          fi
+          echo "版本一致：$PKG"
+
+      - name: 扩展语法自检
+        run: node --experimental-strip-types --check extensions/statusbar.ts
+
+      - name: 校验发布产物只含预期文件
+        run: |
+          npm pack --dry-run --json > /tmp/pack.json
+          node -e '
+          const fs = require("fs");
+          const [p] = JSON.parse(fs.readFileSync("/tmp/pack.json", "utf8"));
+          const allow = [/^extensions\//, /^README\.md$/, /^LICENSE$/, /^package\.json$/];
+          const bad = p.files.map((f) => f.path).filter((x) => !allow.some((r) => r.test(x)));
+          if (bad.length) {
+            console.error("产物含意外文件：", bad.join(", "));
+            process.exit(1);
+          }
+          console.log("产物文件：", p.files.map((f) => f.path).join(", "));
+          console.log(`tarball ${(p.size / 1024).toFixed(1)} kB / unpacked ${(p.unpackedSize / 1024).toFixed(1)} kB`);
+          '
+
+      - name: 发布到 npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "dry-run：只校验，不发布"
+            npm publish --dry-run
+          else
+            npm publish --provenance --access public
+          fi

@@ -8,6 +8,7 @@
 		"type": "git",
 		"url": "git+https://github.com/Lqg97/pi-statusbar.git"
 	},
+	"files": ["extensions", "README.md", "LICENSE"],
 	"peerDependencies": {
 		"@earendil-works/pi-ai": "*",
 		"@earendil-works/pi-coding-agent": "*",
