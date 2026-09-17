@@ -56,20 +56,20 @@ is required to publish packages.
    token 需勾 **Bypass two-factor authentication**、权限选 **Read and write (publish and stage)**；因为包还不存在，**Select Packages 只能选 All Packages**（选不了还没发布的包名）——所以**发完立刻 revoke 这个 token**。
 4. 包已发布后就别再折腾了，配好 Trusted Publisher（下一节）走 OIDC，这些 2FA/token 问题全部消失。
 
-### 发布后 `npm view` 立即 404（不是失败）
+### 发布后 `npm view` 不可立即信任（不是失败）
 
-发布成功（CLI 打印 `+ @qinggangli/pi-statusbar@1.0.0`）后，**元数据大概要 3-4 分钟才能查到**。实测（2026-09-17 首发）：
+发布成功（CLI 打印 `+ @qinggangli/pi-statusbar@x.y.z` 并提示 `Your package is being processed and may take a few minutes to become available`）后，**元数据要几分钟才传播完**。实测两次（2026-09-17）：
 
-```text
-03:54:32Z  created
-03:57:52Z  npm view → 404
-03:58:18Z  npm view → 200   ← 翻转
-```
+| 场景 | 现象 | 实测窗口 |
+| --- | --- | --- |
+| 首发 1.0.0（包不存在） | `npm view` / `npm install` 全部 404，但 tarball 可下 | 约 3 分 45 秒 |
+| 后续 1.0.1（包已存在） | packument 一直 **200 但内容是旧的**（`dist-tags.latest` 还指向上一个版本），新版本 tarball 404 | 约 5 分 50 秒 |
 
-- 这段窗口里 **`npm install` 也会 404**（不是只有 `npm view`；已用全新 cache dir 实测排除本地缓存因素）
-- 但 **tarball 一直可下**：`https://registry.npmjs.org/@qinggangli/pi-statusbar/-/pi-statusbar-1.0.0.tgz`，sha1 应与本地 `npm pack` 一致
-- 判断“到底发没发成功”别靠 `npm view`，靠下载 tarball 比 sha1（或者在发布后等 4 分钟）
-- workflow 里的「检查该版本是否已发布」用的是 `npm view`，所以在这个窗口内重推 tag 会误判为未发布 → 走到真发布分支 → 报版本冲突。等几分钟重跑即可。
+第二种更有迷惑性：`npm view @qinggangli/pi-statusbar version` 会“成功”返回旧版本号，看着像发布没生效。
+
+- **判据不是 `npm view`，而是下载 tarball 比 sha1**：`.../@qinggangli/pi-statusbar/-/pi-statusbar-x.y.z.tgz`，sha1 应与本地 `npm pack` 一致
+- 窗口期内 `npm install` 也会拿到旧版本或 404（已用全新 cache dir 排除本地缓存因素）
+- workflow 里的「检查该版本是否已发布」用 `npm view`：窗口内重推 tag 会被误判为未发布 → 走真发布分支 → 报版本冲突。等几分钟重跑即可。
 
 ## 后续：配好 Trusted Publisher 后打 tag 自动发
 
@@ -93,7 +93,9 @@ git tag v1.0.1
 git push origin main --tags
 ```
 
-workflow 会依次卡 5 道：ref 必须是 tag → tag 与 `version` 一致 → npm CLI 版本支持 OIDC → 扩展语法自检 → 产物白名单。全过之后用 OIDC 换短期凭据发布，provenance 自动生成，**仓库不需要配任何 secret**。
+workflow 会依次卡 6 道：ref 必须是 tag → tag 与 `version` 一致 → npm CLI 版本支持 OIDC → 扩展语法自检 → 产物白名单 → 该版本是否已发布（幂等）。全过之后用 OIDC 换短期凭据发布，provenance 自动生成，**仓库不需要配任何 secret**。
+
+> 已跑通：2026-09-17 用 v1.0.1 首次真实走 OIDC（无任何 token），run 耗时 11 秒，日志里可见 `Signed provenance statement with source and build information from GitHub Actions` 与 sigstore transparency log 条目。v1.0.0 那次只验证了闸门（版本已存在→跳过发布）。
 
 产物白名单在 workflow 里显式写着（`extensions/` + `README.md` + `LICENSE` + `package.json`），`package.json` 的 `files` 字段是它的第一道防线——两边改要同步。
 
