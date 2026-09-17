@@ -56,6 +56,21 @@ is required to publish packages.
    token 需勾 **Bypass two-factor authentication**、权限选 **Read and write (publish and stage)**；因为包还不存在，**Select Packages 只能选 All Packages**（选不了还没发布的包名）——所以**发完立刻 revoke 这个 token**。
 4. 包已发布后就别再折腾了，配好 Trusted Publisher（下一节）走 OIDC，这些 2FA/token 问题全部消失。
 
+### 发布后 `npm view` 立即 404（不是失败）
+
+发布成功（CLI 打印 `+ @qinggangli/pi-statusbar@1.0.0`）后，**元数据大概要 3-4 分钟才能查到**。实测（2026-09-17 首发）：
+
+```text
+03:54:32Z  created
+03:57:52Z  npm view → 404
+03:58:18Z  npm view → 200   ← 翻转
+```
+
+- 这段窗口里 **`npm install` 也会 404**（不是只有 `npm view`；已用全新 cache dir 实测排除本地缓存因素）
+- 但 **tarball 一直可下**：`https://registry.npmjs.org/@qinggangli/pi-statusbar/-/pi-statusbar-1.0.0.tgz`，sha1 应与本地 `npm pack` 一致
+- 判断“到底发没发成功”别靠 `npm view`，靠下载 tarball 比 sha1（或者在发布后等 4 分钟）
+- workflow 里的「检查该版本是否已发布」用的是 `npm view`，所以在这个窗口内重推 tag 会误判为未发布 → 走到真发布分支 → 报版本冲突。等几分钟重跑即可。
+
 ## 后续：配好 Trusted Publisher 后打 tag 自动发
 
 npmjs.com → 你的包 → **Settings** → **Trusted publishing** → GitHub Actions：
@@ -63,7 +78,6 @@ npmjs.com → 你的包 → **Settings** → **Trusted publishing** → GitHub A
 | 字段 | 值 |
 | --- | --- |
 | Organization or user | `Lqg97` ← **GitHub 账号**，不是 npm 账号 |
-| Organization or user | `Lqg97` |
 | Repository | `pi-statusbar` |
 | Workflow filename | `publish.yml`（只填文件名、含 `.yml`） |
 | Environment name | 留空 |
