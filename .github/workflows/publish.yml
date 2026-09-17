@@ -1,7 +1,12 @@
 name: publish
 
 # 打 tag 即发布：git tag v1.0.1 && git push origin v1.0.1
-# 首次发布或补发可在 Actions 页面手动触发（需先把 ref 选成已有的 tag）。
+#
+# 认证走 npm Trusted Publishing（OIDC），仓库里不存任何 token。
+# 前提：先在 npmjs.com 的包设置页配好 Trusted Publisher（见 RELEASING.md）。
+# 注意 OIDC 无法做「首次发布」（包必须先存在），首次发布流程见 RELEASING.md。
+#
+# 手动补发：Actions 页面 Run workflow，ref 必须选已存在的 tag；默认只 dry-run。
 on:
   push:
     tags:
@@ -15,31 +20,48 @@ on:
 
 jobs:
   publish:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest # Trusted Publishing 不支持 self-hosted runner
     permissions:
       contents: read
-      id-token: write # npm provenance 需要
+      id-token: write # OIDC：换短期发布凭据，必需
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      # action 固定到 commit SHA（由 Dependabot 升级），本 job 持有 id-token
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          node-version: 22
-          registry-url: https://registry.npmjs.org
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          # OIDC 要求 Node >= 22.14.0 且 npm CLI >= 11.5.1；
+          # Node 22 自带 npm 10.x，所以这里用 24（自带 npm 11.x）
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      - name: 校验 npm CLI 支持 OIDC
+        run: |
+          CUR="$(npm --version)"
+          echo "npm $CUR / node $(node --version)"
+          LOW="$(printf '%s\n%s\n' 11.5.1 "$CUR" | sort -V | head -1)"
+          if [ "$LOW" != "11.5.1" ]; then
+            echo "::error::npm $CUR 过旧，OIDC 需 >= 11.5.1"
+            exit 1
+          fi
 
       - name: 校验 ref 是 tag
         run: |
           case "$GITHUB_REF" in
             refs/tags/*) echo "tag: $GITHUB_REF_NAME" ;;
-            *) echo "::error::必须在 tag 上运行（当前 $GITHUB_REF），否则版本号校验无意义"; exit 1 ;;
+            *) echo "::error::必须在 tag 上运行：$GITHUB_REF"; exit 1 ;;
           esac
 
       - name: 校验 tag 与 package.json version 一致
+        # npm 不允许重复发布同一版本，tag 与 version 必须对齐
         run: |
           TAG="${GITHUB_REF_NAME#v}"
           PKG="$(node -p "require('./package.json').version")"
           if [ "$TAG" != "$PKG" ]; then
-            echo "::error::tag $GITHUB_REF_NAME 与 package.json version $PKG 不一致（npm 不允许重复发布同一版本，必须先对齐）"
+            echo "::error::tag $GITHUB_REF_NAME != version $PKG"
             exit 1
           fi
           echo "版本一致：$PKG"
@@ -52,25 +74,32 @@ jobs:
           npm pack --dry-run --json > /tmp/pack.json
           node -e '
           const fs = require("fs");
-          const [p] = JSON.parse(fs.readFileSync("/tmp/pack.json", "utf8"));
-          const allow = [/^extensions\//, /^README\.md$/, /^LICENSE$/, /^package\.json$/];
-          const bad = p.files.map((f) => f.path).filter((x) => !allow.some((r) => r.test(x)));
+          const [p] = JSON.parse(
+            fs.readFileSync("/tmp/pack.json", "utf8"));
+          const allow = [/^extensions\//, /^README\.md$/,
+                         /^LICENSE$/, /^package\.json$/];
+          const bad = p.files
+            .map((f) => f.path)
+            .filter((x) => !allow.some((r) => r.test(x)));
           if (bad.length) {
             console.error("产物含意外文件：", bad.join(", "));
             process.exit(1);
           }
-          console.log("产物文件：", p.files.map((f) => f.path).join(", "));
-          console.log(`tarball ${(p.size / 1024).toFixed(1)} kB / unpacked ${(p.unpackedSize / 1024).toFixed(1)} kB`);
+          const list = p.files.map((f) => f.path).join(", ");
+          const kb = (n) => (n / 1024).toFixed(1);
+          console.log("产物文件：", list);
+          console.log(`tarball ${kb(p.size)} kB,`,
+                      `unpacked ${kb(p.unpackedSize)} kB`);
           '
 
       - name: 发布到 npm
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           DRY_RUN: ${{ inputs.dry_run }}
         run: |
           if [ "$DRY_RUN" = "true" ]; then
             echo "dry-run：只校验，不发布"
             npm publish --dry-run
           else
-            npm publish --provenance --access public
+            # Trusted Publishing 下 provenance 自动生成，无需 --provenance
+            npm publish
           fi

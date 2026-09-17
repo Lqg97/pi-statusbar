@@ -1,0 +1,11 @@
+---
+version: 2
+updates:
+  # workflow 里的 action 固定到了 commit SHA，靠这里开 PR 升级
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # 新版本发布后先等几天再升级，避开刚被投毒的版本
+    cooldown:
+      default-days: 7
