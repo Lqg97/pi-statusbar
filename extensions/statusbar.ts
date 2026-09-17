@@ -1011,6 +1011,8 @@ export default function (pi: ExtensionAPI) {
 		inflight: boolean;
 	}
 	const bindings: QuotaBinding[] = [];
+	// 以 providerId 为 key：同一额度源（如 api.kimi.com）可能挂多个 provider，
+	// 每个 provider 各绑一份、各自拉取与缓存，渲染时只取当前 provider 那份
 	const quotaStates = new Map<string, QuotaState>();
 
 	/** 从可用模型反查 provider baseUrl 匹配额度源（models.json 的自定义 provider 不在 getRegisteredProviderIds 里） */
@@ -1021,7 +1023,6 @@ export default function (pi: ExtensionAPI) {
 			if (!model.baseUrl || bindings.some((b) => b.providerId === model.provider))
 				continue;
 			for (const source of QUOTA_SOURCES) {
-				if (bindings.some((b) => b.source.id === source.id)) continue;
 				if (source.match.test(model.baseUrl)) {
 					// baseUrl 非法时 new URL 会抛 TypeError，跳过该 provider 的额度绑定
 					try {
@@ -1045,11 +1046,11 @@ export default function (pi: ExtensionAPI) {
 		ctx: ExtensionContext,
 		force: boolean,
 	): Promise<void> {
-		let state = quotaStates.get(b.source.id);
+		let state = quotaStates.get(b.providerId);
 		if (!state) {
 			// 首次拉取：fetchedAt=0 视为已过期，立即请求
 			state = { seg: null, detail: "", fetchedAt: 0, inflight: false };
-			quotaStates.set(b.source.id, state);
+			quotaStates.set(b.providerId, state);
 		}
 		if (state.inflight) return;
 		if (!force && Date.now() - state.fetchedAt < b.source.ttlMs) return;
@@ -1457,7 +1458,7 @@ export default function (pi: ExtensionAPI) {
 				? undefined
 				: bindings.find((b) => b.providerId === curProvider);
 		if (active) {
-			const state = quotaStates.get(active.source.id);
+			const state = quotaStates.get(active.providerId);
 			if (!state || Date.now() - state.fetchedAt >= active.source.ttlMs)
 				void refreshQuota(active, ctx, false);
 			if (state?.seg) {
@@ -2652,7 +2653,10 @@ export default function (pi: ExtensionAPI) {
 		}
 		await Promise.all(bindings.map((b) => refreshQuota(b, ctx, true)));
 		const line = bindings
-			.map((b) => `${b.source.id}: ${quotaStates.get(b.source.id)?.detail ?? "—"}`)
+			.map(
+			(b) =>
+				`${b.source.id}(${b.providerId}): ${quotaStates.get(b.providerId)?.detail ?? "—"}`,
+		)
 			.join("；")
 			.replace(/\n/g, " ");
 		ctx.ui.notify(line, "info");
