@@ -7,7 +7,7 @@
  * 会话名不占 footer 宽度，只写入终端标题（会话名 · 目录名 · 模型）
  *
  * - 花费按实时单价计算：session 启动时从 models.dev/api.json 拉取各家官方单价（本地缓存 24h），
- *   失败时回落 models.json 的 cost 字段；/statusbar prices 强制刷新并显示当前模型单价来源
+ *   失败时回落 models.json 的 cost 字段；/statusbar prices 强制刷新并显示当前模型单价来源与匹配方式
  *   计价按「每条 assistant 消息自己的模型」逐条进行，会话中途切换模型不会把历史轮次
  *   按新模型单价重算；阶梯定价也按单次请求判定（与 pi-ai 的 calculateCost 一致）
  * - 上下文占用 ≥75% 变黄，≥90% 变红
@@ -54,7 +54,10 @@
  *     hiddenMetrics    隐藏的指标 key 数组，可选：branch/ctx/model/effort/usage/ttft/speed/quota/ext；
  *                      也可用 /statusbar metrics 交互式配置（会写回此字段）
  *     language         配置面板显示语言 "zh" | "en"（默认 "zh"）；/statusbar 菜单语言行 ←→ 切换并即时写回
- *   未配置 priceMap 时按模型 id 在 models.dev 全量中自动匹配（同名取最便宜），零配置可用；
+ *   未配置 priceMap 时按顺序匹配：models.dev 同名 provider 直配 → 模型注册表单价
+ *   （models.json cost / pi 内置目录）→ models.dev 全量同名 id 自动匹配（官方 provider 优先、
+ *   排除 0 价的订阅/免费端点、其余取最便宜）；自动匹配到 0 价或多候选时 /statusbar prices
+ *   会提示并建议配置 priceMap 固定来源。零配置可用；
  *   配置在新会话时重读，改完开新会话即生效
  */
 import type {
@@ -445,10 +448,12 @@ function saveConfigPatch(patch: Record<string, unknown>): void {
 	writeFileSync(CONFIG_FILE, JSON.stringify(raw, null, "\t") + "\n");
 }
 
-let config = loadConfig();
-
-/** 配置文件里是否还有旧版的 split 字段（一次性迁移用，见 session_start） */
+/** 配置文件里是否还有旧版的 split 字段（一次性迁移用，见 session_start）。
+ *  注意必须声明在 loadConfig() 首次调用之前：loadConfig 成功解析后会写这个变量，
+ *  若声明在其后，首次调用会撞 TDZ 抛 ReferenceError，被 catch 吞掉后整份配置静默回落默认值 */
 let legacySplitKey = false;
+
+let config = loadConfig();
 
 /** models.dev 模型单价 → 本地 ModelCost 结构 */
 function toModelCost(c: any): ModelCost {
@@ -471,6 +476,41 @@ function toModelCost(c: any): ModelCost {
 const MODELS_DEV_URL = "https://models.dev/api.json";
 const PRICE_TTL_MS = 24 * 60 * 60_000;
 const PRICE_CACHE_FILE = join(homedir(), ".pi/agent/.models-dev-prices.json");
+
+/** models.dev 上的模型原厂 provider：全量自动匹配多候选时优先于第三方中转/聚合站 */
+const OFFICIAL_PROVIDERS = new Set([
+	"anthropic",
+	"openai",
+	"google",
+	"deepseek",
+	"moonshotai",
+	"moonshotai-cn",
+	"zhipuai",
+	"xai",
+	"minimax",
+	"alibaba",
+	"alibaba-cn",
+	"mistral",
+]);
+
+/** 单价是否为 0（input+output 均 ≤0：多为订阅制/免费端点，或未定价）。注意 pi 对缺省 cost 也补全 0 */
+function isZeroCost(c: { input?: number; output?: number } | undefined | null): boolean {
+	return !c || ((c.input ?? 0) <= 0 && (c.output ?? 0) <= 0);
+}
+
+/** 每个 provider:model 单价的匹配来源（/statusbar prices 展示与运行时叠加用） */
+interface PriceMeta {
+	/** priceMap=显式映射；provider=models.dev 同名 provider 直配；runtime=模型注册表（models.json/内置目录）；auto=models.dev 全量自动匹配 */
+	source: "priceMap" | "provider" | "runtime" | "auto";
+	/** models.dev 上实际采用的 "provider/model"（runtime 来源无此字段） */
+	via?: string;
+	/** auto 匹配时的同名候选总数 */
+	candidates?: number;
+	/** auto 匹配时被丢弃的 0 价候选数（订阅/免费端点） */
+	droppedZero?: number;
+	/** 所有同名候选都是 0 价（典型：订阅制端点），选中者也是 0 价 */
+	allZero?: boolean;
+}
 
 /** 数字缩写：999 → 999，12.3k，1.23m */
 function fmtTokens(n: number): string {
@@ -993,6 +1033,10 @@ export default function (pi: ExtensionAPI) {
 	let liveTs = 0;
 	// 实时单价表（models.dev），key 为 "provider:modelId"
 	let priceTable: Record<string, ModelCost> = {};
+	// 每个键的匹配来源（与 priceTable 同步维护，随缓存持久化）
+	let priceMeta: Record<string, PriceMeta> = {};
+	// 最近一次联网拉取建立的 models.dev 同名索引（/statusbar prices 提示用，仅内存）
+	let lastById = new Map<string, { pid: string; id: string; cost: any }[]>();
 	let priceStamp = "init";
 	let priceSource = "models.json";
 	let priceInflight = false;
@@ -1078,6 +1122,7 @@ export default function (pi: ExtensionAPI) {
 	function loadPriceCache(): {
 		fetchedAt: number;
 		prices: Record<string, ModelCost>;
+		meta?: Record<string, PriceMeta>;
 	} | null {
 		try {
 			const raw = JSON.parse(readFileSync(PRICE_CACHE_FILE, "utf8"));
@@ -1086,6 +1131,33 @@ export default function (pi: ExtensionAPI) {
 			// 首次使用或缓存损坏，忽略
 		}
 		return null;
+	}
+
+	/**
+	 * 把模型注册表里的非零单价（models.json 手写 cost / pi 内置目录）叠加到价格表。
+	 * 只覆盖 auto 猜测或未匹配的条目，不碰 priceMap 显式映射与 provider 直配；
+	 * 同时清掉缓存里已失效的 runtime 条目（用户从 models.json 删了 cost）。
+	 * 该数据本地可得、不随 24h 缓存过期，任何路径（含缓存命中与网络失败）都执行。
+	 */
+	function applyRuntimePrices(ctx: ExtensionContext): void {
+		const runtime = new Map<string, ModelCost>();
+		for (const m of ctx.modelRegistry.getAvailable()) {
+			if (!m?.provider || !m?.id) continue;
+			const c = (m as any)?.cost;
+			if (!isZeroCost(c)) runtime.set(`${m.provider}:${m.id}`, c);
+		}
+		for (const [key, meta] of Object.entries(priceMeta)) {
+			if (meta.source === "runtime" && !runtime.has(key)) {
+				delete priceTable[key];
+				delete priceMeta[key];
+			}
+		}
+		for (const [key, c] of runtime) {
+			const src = priceMeta[key]?.source;
+			if (src === "priceMap" || src === "provider") continue;
+			priceTable[key] = c;
+			priceMeta[key] = { source: "runtime" };
+		}
 	}
 
 	/** 拉取 models.dev 全量单价并投影到本地 provider:模型 键；失败静默保留旧值 */
@@ -1097,9 +1169,12 @@ export default function (pi: ExtensionAPI) {
 		const cached = loadPriceCache();
 		if (cached) {
 			priceTable = cached.prices;
+			priceMeta = cached.meta ?? {};
 			priceStamp = `cache:${cached.fetchedAt}`;
 			priceSource = "models.dev(缓存)";
 		}
+		// 注册表单价本地可得，任何路径都先叠加（含缓存命中与后续网络失败）
+		applyRuntimePrices(ctx);
 		if (!force && cached && Date.now() - cached.fetchedAt < PRICE_TTL_MS) return;
 
 		priceInflight = true;
@@ -1110,53 +1185,94 @@ export default function (pi: ExtensionAPI) {
 			if (!res.ok) throw new Error(`HTTP ${res.status}`);
 			const json: any = await res.json();
 			const providers = json?.providers ?? json;
-			const next: Record<string, ModelCost> = {};
+		const next: Record<string, ModelCost> = {};
+			const nextMeta: Record<string, PriceMeta> = {};
 			// 1) 显式 priceMap 优先：key 为本地 "provider:model" 或裸 "model"
 			for (const [key, [pname, mid]] of Object.entries(config.priceMap)) {
 				const c = providers?.[pname]?.models?.[mid]?.cost;
-				if (c) next[key] = toModelCost(c);
+				if (c) {
+					next[key] = toModelCost(c);
+					nextMeta[key] = { source: "priceMap", via: `${pname}/${mid}` };
+				}
 			}
-			// 2) models.dev 全量按模型 id 建索引（同 id 可能有多家 provider 提供）
-			const byId = new Map<string, any[]>();
-			for (const p of Object.values<any>(providers ?? {})) {
+			// 2) models.dev 全量按模型 id 建索引（同 id 可能有多家 provider 提供，记录来源）
+			const byId = new Map<string, { pid: string; id: string; cost: any }[]>();
+			for (const [pid, p] of Object.entries<any>(providers ?? {})) {
 				for (const [id, m] of Object.entries<any>(p?.models ?? {})) {
 					if (!m?.cost) continue;
 					const k = id.toLowerCase();
+					const entry = { pid, id, cost: m.cost };
 					const list = byId.get(k);
-					if (list) list.push(m.cost);
-					else byId.set(k, [m.cost]);
+					if (list) list.push(entry);
+					else byId.set(k, [entry]);
 				}
 			}
-			// 3) 本地可用模型自动投影：显式映射 → provider/model 直配 → 跨 provider 同名 id 取最便宜
+			lastById = byId;
+			// 3) 本地可用模型自动投影，按顺序取第一个命中：
+			//    priceMap 裸 model 映射 → models.dev 同名 provider 直配 → 注册表单价（models.json/内置目录）
+			//    → models.dev 全量同名 id 自动匹配（官方 provider 优先，排除 0 价订阅/免费端点，其余取最便宜）
 			for (const m of ctx.modelRegistry.getAvailable()) {
 				if (!m?.provider || !m?.id) continue;
 				const key = `${m.provider}:${m.id}`;
 				if (next[key]) continue;
 				const bare = config.priceMap[m.id];
-				const c =
-					(bare ? providers?.[bare[0]]?.models?.[bare[1]]?.cost : undefined) ??
-					providers?.[m.provider]?.models?.[m.id]?.cost ??
-					byId
-						.get(m.id.toLowerCase())
-						?.reduce((a: any, b: any) =>
-							a.input + a.output <= b.input + b.output ? a : b,
-						);
-				if (c) next[key] = toModelCost(c);
+				const mapped = bare
+					? providers?.[bare[0]]?.models?.[bare[1]]?.cost
+					: undefined;
+				if (mapped) {
+					next[key] = toModelCost(mapped);
+					nextMeta[key] = { source: "priceMap", via: `${bare[0]}/${bare[1]}` };
+					continue;
+				}
+				const direct = providers?.[m.provider]?.models?.[m.id]?.cost;
+				if (direct) {
+					next[key] = toModelCost(direct);
+					nextMeta[key] = { source: "provider", via: `${m.provider}/${m.id}` };
+					continue;
+				}
+				const runtime = (m as any)?.cost;
+				if (!isZeroCost(runtime)) {
+					next[key] = runtime;
+					nextMeta[key] = { source: "runtime" };
+					continue;
+				}
+				const candidates = byId.get(m.id.toLowerCase());
+				if (!candidates?.length) continue;
+				const nonZero = candidates.filter((e) => !isZeroCost(e.cost));
+				// 全部 0 价时仍取其一（订阅制端点确实免费），由 meta.allZero 标记供 /statusbar prices 提示
+				const pool = nonZero.length ? nonZero : candidates;
+				const official = pool.filter((e) => OFFICIAL_PROVIDERS.has(e.pid));
+				const finalPool = official.length ? official : pool;
+				const pick = finalPool.reduce((a, b) =>
+					(a.cost.input ?? 0) + (a.cost.output ?? 0) <=
+					(b.cost.input ?? 0) + (b.cost.output ?? 0)
+						? a
+						: b,
+				);
+				next[key] = toModelCost(pick.cost);
+				nextMeta[key] = {
+					source: "auto",
+					via: `${pick.pid}/${pick.id}`,
+					candidates: candidates.length,
+					droppedZero: candidates.length - pool.length || undefined,
+					allZero: nonZero.length === 0 || undefined,
+				};
 			}
 			if (Object.keys(next).length === 0) throw new Error("未匹配到任何模型单价");
 			priceTable = next;
+			priceMeta = nextMeta;
 			priceStamp = `net:${Date.now()}`;
 			priceSource = "models.dev(实时)";
 			try {
 				writeFileSync(
 					PRICE_CACHE_FILE,
-					JSON.stringify({ fetchedAt: Date.now(), prices: next }),
+					JSON.stringify({ fetchedAt: Date.now(), prices: next, meta: nextMeta }),
 				);
 			} catch {
 				// 写缓存失败不影响使用
 			}
 		} catch {
-			// 拉取失败：保留缓存/models.json 兜底
+			// 拉取失败：保留缓存/注册表/models.json 兜底
 			if (!cached) priceSource = "models.json";
 		} finally {
 			priceInflight = false;
@@ -2770,15 +2886,58 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	/** 刷新 models.dev 实时单价并显示当前模型单价来源（/statusbar prices 子命令） */
+	/** 刷新 models.dev 实时单价并显示当前模型单价来源与匹配方式（/statusbar prices 子命令） */
 	async function refreshPricesNow(ctx: ExtensionContext): Promise<void> {
 		await refreshPrices(ctx, true);
 		const model = ctx.model;
 		const r = ratesFor(ctx);
-		const line = r
-			? `${model?.id ?? "?"}: $${r.input}/$${r.output} 每百万（缓存读 $${r.cacheRead ?? 0}）来源 ${priceSource}`
-			: `${model?.id ?? "?"}: 无可用单价（来源 ${priceSource}）`;
+		const meta = model ? priceMeta[`${model.provider}:${model.id}`] : undefined;
+		// meta 缺失且单价为 0 = 只有 pi 默认补的 0 价 cost，等于无可用单价
+		if (!r || (!meta && isZeroCost(r))) {
+			// 附带 models.dev 同名候选（若有），方便直接抄进 priceMap
+			const cands = model
+				? (lastById.get(model.id.toLowerCase()) ?? [])
+				: [];
+			const hint = cands.length
+				? `；同名候选: ${cands
+						.slice(0, 3)
+						.map(
+							(e) =>
+								`${e.pid}/${e.id} $${e.cost?.input ?? 0}/$${e.cost?.output ?? 0}`,
+						)
+						.join("，")}${cands.length > 3 ? ` 等 ${cands.length} 个` : ""}`
+				: "";
+			ctx.ui.notify(
+				`${model?.id ?? "?"}: 无可用单价（来源 ${priceSource}）。可在 statusbar.json 的 priceMap 加 "${model?.provider ?? "provider"}:${model?.id ?? "model"}": ["models.dev的provider", "模型id"]${hint}`,
+				"warning",
+			);
+			return;
+		}
+		const SRC_LABEL: Record<PriceMeta["source"], string> = {
+			priceMap: "priceMap 显式映射",
+			provider: "models.dev 同名直配",
+			runtime: "models.json/内置目录",
+			auto: "models.dev 自动匹配",
+		};
+		let line = `${model?.id ?? "?"}: $${r.input}/$${r.output} 每百万（缓存读 $${r.cacheRead ?? 0}）来源 ${priceSource}`;
+		if (meta)
+			line += ` · ${SRC_LABEL[meta.source]}${meta.via ? ` ${meta.via}` : ""}`;
 		ctx.ui.notify(line, "info");
+		// 自动匹配结果需要用户留意时给出提示与 priceMap 建议
+		if (meta?.source === "auto" && meta.allZero) {
+			ctx.ui.notify(
+				`⚠ 同名 ${meta.candidates ?? 1} 个条目全部 0 价（多为订阅/免费端点），花费将显示 $0。若该模型实际按量计费，请在 priceMap 指向官方条目（候选见 https://models.dev）`,
+				"warning",
+			);
+		} else if (
+			meta?.source === "auto" &&
+			((meta.candidates ?? 0) > 1 || (meta.droppedZero ?? 0) > 0)
+		) {
+			ctx.ui.notify(
+				`自动匹配到 ${meta.via}（${meta.candidates} 个同名候选${meta.droppedZero ? `，已跳过 ${meta.droppedZero} 个 0 价` : ""}，取官方/最低价）。配置 priceMap 可固定来源`,
+				"info",
+			);
+		}
 	}
 
 	pi.registerCommand("exit", {

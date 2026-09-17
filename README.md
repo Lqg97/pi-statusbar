@@ -20,7 +20,7 @@ main │ ↑12.3k ↓45.6k ⚡100k·85% $0.123 ⏱980ms 128 tok/s │ ▰▰▰�
 ## 功能
 
 - **替换内置 footer**：`git 分支 │ ↑输入 ↓输出 ⚡缓存·命中率 $花费 ⏱首token 输出tok/s │ 上下文% │ 订阅额度 │ 模型 │ 其他扩展状态`
-- **实时单价**：从 [models.dev](https://models.dev) 拉取官方单价计算花费（本地缓存 24h），失败回落 models.json 的 cost 字段；`/statusbar prices` 强制刷新并显示单价来源
+- **实时单价**：从 [models.dev](https://models.dev) 拉取官方单价计算花费（本地缓存 24h），失败回落 models.json 的 cost 字段；自动匹配会跳过 0 价的订阅/免费端点，`/statusbar prices` 强制刷新并显示单价来源与匹配方式（命中 0 价/多候选时给出 priceMap 建议）
 - **上下文告警**：占用 ≥75% 变黄，≥90% 变红
 - **订阅额度自动发现**：按 provider baseUrl 匹配，只显示当前模型所属 provider 的额度
 
@@ -108,12 +108,15 @@ pi remove git:github.com/Lqg97/pi-statusbar
 }
 ```
 
-**单价自动匹配规则**（未配置 priceMap 时，按顺序取第一个命中）：
+**单价匹配规则**（按顺序取第一个命中）：
 
 1. `priceMap` 中 `"provider:model"` 精确映射
 2. `priceMap` 中裸 `"model"` 映射
 3. models.dev 中同名 provider + 同名模型直接匹配
-4. models.dev 全量中按模型 id 匹配（忽略大小写，多候选取输入+输出单价最低者）
+4. 模型注册表单价（models.json 手写的 `cost` / pi 内置目录，非零才采用）
+5. models.dev 全量中按模型 id 自动匹配（忽略大小写；**官方 provider 优先**，**排除 0 价的订阅/免费端点**，其余取输入+输出单价最低者；若同名条目全部 0 价则取其一并标记）
+
+自动匹配到 0 价条目（典型：订阅制端点，花费会显示 $0）或存在多个同名候选时，`/statusbar prices` 会给出警告并建议配置 `priceMap` 固定来源。
 
 本地中转站/网关的模型名与官方名不一致时（如 `kimi-for-coding` 实为 `kimi-k2.7-code`）才需要显式 `priceMap`。
 
