@@ -95,13 +95,14 @@ jobs:
       - name: 检查该版本是否已发布
         id: published
         run: |
+          NAME="$(node -p "require('./package.json').name")"
           PKG="$(node -p "require('./package.json').version")"
-          if npm view "pi-statusbar@$PKG" version >/dev/null 2>&1; then
+          if npm view "$NAME@$PKG" version >/dev/null 2>&1; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::pi-statusbar@$PKG 已在 registry 上"
+            echo "::notice::$NAME@$PKG 已在 registry 上"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
-            echo "pi-statusbar@$PKG 尚未发布"
+            echo "$NAME@$PKG 尚未发布"
           fi
 
       - name: 发布到 npm

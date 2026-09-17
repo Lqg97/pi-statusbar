@@ -7,6 +7,8 @@
 ## 一次性：首次发布（必须手动）
 
 > 账号对照：npm 是 **`qinggangli`**，GitHub 是 **`Lqg97`**，两者不同名——下面每一步要填哪个别搞混。
+>
+> 包名是 **scoped** 的 `@qinggangli/pi-statusbar`：裸名 `pi-statusbar` 被 npm 拒了（“Package name too similar to existing package pi-status-bar”——那个是 pi 官方发的同类扩展，见 [earendil-works/pi-status-bar](https://github.com/earendil-works/pi-status-bar)），**别再想着改回裸名**。scoped 包默认私有，所以 `package.json` 里写死了 `publishConfig.access: public`，`npm publish` 不需要手动带 `--access=public`（带上也无害）。
 
 npm 的 Trusted Publishing（OIDC）**不能用于首次发布**：包必须先存在于 registry，包设置页才会出现 Trusted Publisher 配置项。npm 官方文档至今没写这个场景（[npm/documentation#1926](https://github.com/npm/documentation/issues/1926) 仍未关闭，多位用户确认首次 OIDC 发布会失败、只能手动补第一次）。所以第一次老老实实手动发：
 

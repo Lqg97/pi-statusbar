@@ -41,19 +41,19 @@ main │ ↑12.3k ↓45.6k ⚡100k·85% $0.123 ⏱980ms 128 tok/s │ ▰▰▰�
 
 ```bash
 # 从 npm 安装（推荐，不需要 GitHub 访问权限）
-pi install npm:pi-statusbar
+pi install npm:@qinggangli/pi-statusbar
 
 # 更新（未固定版本时跟随 latest）
 pi update --extensions
 
 # 固定版本（固定后 pi update --extensions 会跳过它）
-pi install npm:pi-statusbar@1.0.0
+pi install npm:@qinggangli/pi-statusbar@1.0.0
 
 # 临时试用（不落盘）
-pi -e npm:pi-statusbar
+pi -e npm:@qinggangli/pi-statusbar
 
 # 卸载（配置文件 ~/.pi/agent/statusbar.json 会残留，不需要可一并删除）
-pi remove npm:pi-statusbar
+pi remove npm:@qinggangli/pi-statusbar
 ```
 
 跟着主线代码跑（开发／尝鲜）可以走 git 源：
