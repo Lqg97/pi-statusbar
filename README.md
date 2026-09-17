@@ -163,7 +163,7 @@ regular 模式下选 `split` 不会报错，而是退回底部单行、且**不�
 
 ## 兼容性
 
-- pi 核心包（`@earendil-works/pi-ai` / `pi-coding-agent` / `pi-tui`）以 peerDependencies 声明，由 pi 内置提供，无第三方运行时依赖
+- pi 核心包（`@earendil-works/pi-ai` / `pi-coding-agent` / `pi-tui`）由 pi 内置提供，声明为 **optional** peerDependencies：安装时不会重复拉一份 pi 本体（实测首装 ~0.1MB；若声明成必需 peer 会被 npm 连带装 249MB），扩展本身也没有第三方运行时依赖
 - `layout: "split"` 与「Agent 面板入栏」依赖较新 pi-tui 的 `HStack` / `VStack` 布局组件；旧版 pi 会静默退回底部单行——看不到分栏时请先升级 pi
 - 花费计算含阶梯定价，逻辑与 pi-ai 的 `calculateCost` 一致
 - 生成中的 tok/s 按字符估算（英文 ~4 字符/token，CJK ~1.5 字符/token），带 `~` 前缀；响应结束后显示精确值
