@@ -33,6 +33,13 @@ main │ ↑12.3k ↓45.6k ⚡100k·85% $0.123 ⏱980ms 128 tok/s │ ▰▰▰�
   | DeepSeek · OpenRouter · Moonshot 开放平台 · SiliconFlow · StepFun · Novita AI | 按量账户余额（按量计费，无重置概念） |
 
   每个窗口用量后括注恢复倒计时（`45s` / `13m` / `2h13m` / `6d4h`：不足 24h 按 `xhyym`，超 24h 按 `xdyyh`，渲染时按重置时刻实时换算，时刻缺失则不显示）；底部单行各窗口用 `·` 连接，右侧面板逐窗口分行。`/statusbar quota` 强制刷新并显示详情（含各窗口「重置于 2026-09-15 15:45（3h56m）」）
+- **订阅用量统计（`/statusbar subs`）**：全屏面板，按订阅列出各周期消耗的 **token 数与 API 等价费用**，并带 **7×24 热力图**。
+
+  - **数据源**：只扫 pi 自己的会话日志目录 `~/.pi/agent/sessions`（递归所有 `.jsonl`），**不依赖 ai-sub-dashboard 在跑**。只统计 `type=message` 的 assistant 行，按消息 id 跨文件去重（pi 的 `/tree` fork 会把历史消息整段复制进新 session，实测不先去重会多算约 10%）。同目录下 `subagent-artifacts/` 的 `recordType` 结构天然被排除，不会重复计数
+  - **费用口径**：与 footer 实时花费**同源**（`priceTable` + 阶梯定价 + 1h 缓存写规则），因此面板数与 footer 数一致；查不到单价时回落 pi 自己算的 `usage.cost.total`（实测约 97% 的消息能命中单价表）
+  - **周期**：固定四档 `today` / `24h` / `7d` / `30d`，外加**额度窗口**——GLM / Kimi / OpenCode Go / MiniMax 的实时额度接口会带回窗口长度与重置时刻，面板用 `resetAt - spanMs` 反推窗口起点，因此「5h 窗口已用 token」与官方百分比是同一个窗口（明细表里带 `⟲` 标记）；没有额度接口的订阅可用 `subscriptions[].quotaWindows` 手工声明
+  - **面板操作**：`↑↓` 选订阅 · `←→` 换热力图周期 · `h` 切 tokens/费用 · `r` 强制重扫 · `Esc`/`q` 关闭
+  - **性能**：扫描结果按文件 `mtime`+`size` 增量缓存到 `~/.pi/agent/.statusbar-subs-cache.json`；热启动约 10ms，首次全量约 0.5s（实测 133MB / 137 文件 / 约 1.2 万条唯一消息），期间每 8 个文件让出一次事件循环，不卡 TUI
 - **终端标题**：会话名写入终端标题（`pi · 会话名`），不占 footer 宽度（VSCode/Cursor 内置终端看不到时见「排障」）
 - **窄终端自适应**：按 扩展状态 → 额度/token → 模型 的顺序逐段收起，仍放不下时整段换行成多行（分支与上下文永不丢弃）
 - **布局可选（layout）**：`bottom` / `right` / `auto`（默认）/ `split` 右侧分栏，详见「布局」一节
@@ -104,7 +111,21 @@ pi remove git:github.com/Lqg97/pi-statusbar
  // 也可用 /statusbar metrics 交互式配置（会写回此字段）。示例：["ttft"]
  "hiddenMetrics": [],
  // 配置面板显示语言："zh" / "en"（默认 zh），/statusbar 菜单语言行 ←→ 切换
- "language": "zh"
+ "language": "zh",
+ // 订阅列表（/statusbar subs 的统计口径）；缺省空数组 = 面板只显示「未归属」汇总
+ // 归属：providerFilter 全局优先于 modelFilter，同层按配置顺序先到先得；两者都缺省的条目永不自动归属
+ "subscriptions": [
+  // providerFilter 匹配 provider id（精确或子串，大小写不敏感）
+  { "id": "sub-glm", "name": "Zhipu GLM", "plan": "pro", "priceMonthly": 23,
+    "startDate": "2026-07-01", "expireAt": "2026-09-30", "autoRenew": true,
+    "providerFilter": ["cc-switch-zhipu-glm"] },
+  // modelFilter 匹配模型名（子串，大小写不敏感；写成 "/re/" 则按正则）
+  { "id": "sub-or", "name": "OpenRouter", "billingType": "prepaid",
+    "modelFilter": ["deepseek", "/^qwen/"] },
+  // 没有额度接口、又想要额外窗口时，用 quotaWindows 手工声明（key = 展示标签，spanMs = 窗口长度）
+  { "id": "sub-x", "name": "自建中转", "modelFilter": ["my-relay"],
+    "quotaWindows": [{ "key": "5h", "spanMs": 18000000 }, { "key": "周", "spanMs": 604800000 }] }
+ ]
 }
 ```
 
@@ -119,6 +140,25 @@ pi remove git:github.com/Lqg97/pi-statusbar
 自动匹配到 0 价条目（典型：订阅制端点，花费会显示 $0）或存在多个同名候选时，`/statusbar prices` 会给出警告并建议配置 `priceMap` 固定来源。
 
 本地中转站/网关的模型名与官方名不一致时（如 `kimi-for-coding` 实为 `kimi-k2.7-code`）才需要显式 `priceMap`。
+
+### 订阅用量统计（`subscriptions`）
+
+`/statusbar subs` 打开的全屏面板，按订阅展示各周期 token 与 API 等价费用 + 7×24 热力图。配置只需在 `statusbar.json` 加一个 `subscriptions` 数组（见上面的配置示例）：
+
+| 字段 | 说明 |
+| --- | --- |
+| `id` / `name` | 面板里的标识与显示名（`name` 必填；`id` 缺省自动生成） |
+| `providerFilter` | 匹配 **provider id**（如 `cc-switch-zhipu-glm`），精确或子串，大小写不敏感；优先级高于 `modelFilter` |
+| `modelFilter` | 匹配**模型名**，子串或 `/正则/`（如 `["glm"]` 一次覆盖 `glm-5.3` 与 `glm-5.3-flash`） |
+| `quotaWindows` | `[{ "key": "5h", "spanMs": 18000000 }]`，手工声明额度窗口；有实时额度接口时不必配 |
+| `priceMonthly` / `plan` / `startDate` / `expireAt` / `autoRenew` / `status` / `billingType` | 订阅元信息，面板展示用 |
+
+几条口径说明：
+
+- **未归属单独成行**：没被任何 `providerFilter`/`modelFilter` 命中的事件会归入「未归属」，避免配漏一条订阅时用量凭空消失。**两个过滤器都不填的条目永不自动归属**，防止一个空过滤器吃掉全部用量
+- **多条订阅同时命中时按配置顺序先到先得**；但 `providerFilter` 是全局优先层，所以把一条宽松的 `modelFilter` 写在前面，也不会抢走 `providerFilter` 能明确归属的用量
+- **额度窗口对齐**：会话日志里只有 token、没有窗口边界，所以 5h/周/月 这类窗口由 provider 的重置时刻反推起点（`resetAt - spanMs`）。明细表里 `used` 列的 `⟲` 表示该窗口已对齐（此时「已用 token」与官方百分比同窗口，可直接对照，不会出现「显示 12% 但本地按 now-5h 算出的用量偏高/偏低」）
+- **与 ai-sub-dashboard 的数字可能不同**：dashboard 只按**模型名归一化**查单价，本扩展按 **`provider:model` 精确键**查（即 footer 的同一套 `priceTable`），两者在某些模型上会选到不同的 models.dev 条目（例如订阅制端点 dashboard 会取到 0 价条目）。本扩展的选择与 pi 自己写的 `usage.cost.total` 逐条一致，想要固定来源可用 `priceMap` 覆盖
 
 ## 布局
 
@@ -156,7 +196,7 @@ regular 模式下选 `split` 不会报错，而是退回底部单行、且**不�
 
 | 命令 | 说明 |
 | --- | --- |
-| `/statusbar` | 无参数打开交互式菜单：布局（auto/bottom/right/split）/ 面板边框 / 面板填充 / Agent 面板入栏 / 语言（光标在对应行时 ←→ 调值，即时生效并写回配置）/ 指标显隐（↑↓ 选择、Space 切换、Enter 保存、Esc 取消）/ 启用停用；Enter 确认、Esc 退出 |
+| `/statusbar` | 无参数打开交互式菜单：布局（auto/bottom/right/split）/ 面板边框 / 面板填充 / Agent 面板入栏 / 语言（光标在对应行时 ←→ 调值，即时生效并写回配置）/ 指标显隐（↑↓ 选择、Space 切换、Enter 保存、Esc 取消）/ 订阅统计 / 启用停用；Enter 确认、Esc 退出 |
 | `/statusbar on\|off` | 启用 / 停用自定义状态栏（停用后恢复内置 footer） |
 | `/statusbar layout [right\|bottom\|auto\|split]` | 切换布局并写回配置，不带参数时按 自动 → 底部 → 右侧 → 右侧分栏 循环；选 `split` 会自动把 pi 的 `tuiMode` 设为 `fullscreen`（切走时还原） |
 | `/statusbar split [on\|off]` | `layout split` 的快捷别名：`on` = 右侧分栏，`off` = 回到默认布局；不带参数时取反 |
@@ -164,6 +204,7 @@ regular 模式下选 `split` 不会报错，而是退回底部单行、且**不�
 | `/statusbar fill [on\|off]` | 分栏面板是否铺满整屏高度（写回 `panelFill` 并立即重绘），不带参数时取反；只对 `layout: split` 生效 |
 | `/statusbar dock [on\|off]` | split 分栏时把 agent 面板（pi-subagents 的异步任务 widget）搬进右栏（写回 `dockWidgetsInSplit` 并立即重排），不带参数时取反 |
 | `/statusbar metrics` | 直接进入指标显隐交互式配置 |
+| `/statusbar subs` | 打开订阅用量统计面板（各周期 token / API 等价费用 + 7×24 热力图；`↑↓` 选订阅、`←→` 换热力图周期、`h` 切 tokens/费用、`r` 重扫、`Esc` 关闭） |
 | `/statusbar quota` | 强制刷新订阅额度并显示详情 |
 | `/statusbar prices` | 强制刷新实时单价并显示当前模型单价来源 |
 | `/exit` | 退出 pi（`/quit` 的别名） |
