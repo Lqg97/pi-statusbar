@@ -4202,7 +4202,8 @@ export default function (pi: ExtensionAPI) {
 				await runMetricsPicker(ctx);
 				return;
 			}
-			if (sub === "subs") {
+			// sub / subscriptions 也收：subs 少打一个 s 是常见误输，没必要让人对着报错再试一次
+			if (sub === "subs" || sub === "sub" || sub === "subscriptions") {
 				await openSubsDashboard(ctx);
 				return;
 			}
