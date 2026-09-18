@@ -340,6 +340,7 @@ const UI_TEXT = {
 		subsHeatmap: "热力图",
 		subsTokens: "Tokens",
 		subsCost: "费用",
+		subsQuotaUsed: "额度已用",
 		subsHeaderName: "订阅",
 		subsScanning: (files: number, events: number, parsed: number) =>
 			`扫描 ${files} 文件 · ${events} 条事件${parsed ? ` · 本次重解 ${parsed}` : " · 全部命中缓存"}`,
@@ -390,6 +391,7 @@ const UI_TEXT = {
 		subsHeatmap: "Heatmap",
 		subsTokens: "Tokens",
 		subsCost: "Cost",
+		subsQuotaUsed: "Quota used",
 		subsHeaderName: "Subscription",
 		subsScanning: (files: number, events: number, parsed: number) =>
 			`${files} files · ${events} events${parsed ? ` · ${parsed} re-parsed` : " · all cached"}`,
@@ -2042,6 +2044,22 @@ export default function (pi: ExtensionAPI) {
 			this.cachedLines = undefined;
 		}
 
+		/** 首次载入后把光标落在 30d 用量最大的订阅上：配置顺序里第一条可能没有近期用量，
+		 *  死守第 0 行会让面板一打开就是空热力图（首屏观感差）。❯ 标记会明确当前选中的是哪一行 */
+		initSelection(): void {
+			let best = 0;
+			let bestTokens = -1;
+			this.rows.forEach((r, i) => {
+				const t30 = r.windows.find((w) => w.key === "30d")?.tokens ?? 0;
+				if (t30 > bestTokens) {
+					bestTokens = t30;
+					best = i;
+				}
+			});
+			this.sel = best;
+			this.heatIdx = 0;
+		}
+
 		handleInput(data: string): void {
 			for (const seq of splitKeySeqs(data)) this.handleKey(seq);
 		}
@@ -2175,7 +2193,10 @@ export default function (pi: ExtensionAPI) {
 			);
 			const fixedW = nameW + tW * FIXED_WINDOWS.length + cW * 2;
 			const showCost = width >= fixedW + 10;
-			const quotaW = Math.max(0, width - fixedW - (hasQuota ? 1 : 0));
+			// 额度列只在真有额度数据时才占位（否则表头会出现一个永远空白的列）
+			const quotaW = hasQuota
+				? Math.max(0, width - fixedW - (showCost ? 0 : 0) - 1)
+				: 0;
 
 			const header: Cell[] = [
 				{ text: T.subsHeaderName, w: nameW },
@@ -2185,7 +2206,7 @@ export default function (pi: ExtensionAPI) {
 				header.push({ text: "7d $", w: cW, right: true });
 				header.push({ text: "30d $", w: cW, right: true });
 			}
-			if (quotaW > 6) header.push({ text: T.subsTokens + "%", w: quotaW });
+			if (quotaW > 6 && hasQuota) header.push({ text: T.subsQuotaUsed, w: quotaW });
 
 			const out: string[] = [th.fg("dim", cellsToLine(header, width))];
 			this.rows.forEach((r, i) => {
@@ -2210,7 +2231,7 @@ export default function (pi: ExtensionAPI) {
 						cells.push({ text: w ? fmtCostShort(w.costUSD) : "—", w: cW, right: true });
 					}
 				}
-				if (quotaW > 6) {
+				if (quotaW > 6 && hasQuota) {
 					const q = r.windows
 						.filter((w) => w.percent != null)
 						.map((w) => `${w.key} ${Math.round(w.percent!)}%`)
@@ -2345,6 +2366,7 @@ export default function (pi: ExtensionAPI) {
 		void Promise.all(bindings.map((b) => refreshQuota(b, ctx, false)));
 
 		let comp: SubsDashboardComponent | null = null;
+		let selectionInitialized = false;
 		const load = async (tui: TUI, force: boolean): Promise<void> => {
 			const c = comp;
 			if (!c) return;
@@ -2357,6 +2379,10 @@ export default function (pi: ExtensionAPI) {
 				if (!comp) return;
 				const { list, unattr } = buildAllSubStats(r.events, Date.now());
 				c.rows = unattr ? [...list, unattr] : list;
+				if (!selectionInitialized) {
+					selectionInitialized = true;
+					c.initSelection();
+				}
 				c.meta = r;
 				c.loading = false;
 			} catch (e) {
