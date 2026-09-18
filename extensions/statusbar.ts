@@ -346,6 +346,11 @@ const UI_TEXT = {
 		subsScanning: (files: number, events: number, parsed: number) =>
 			`扫描 ${files} 文件 · ${events} 条事件${parsed ? ` · 本次重解 ${parsed}` : " · 全部命中缓存"}`,
 		subsScanFailed: (e: unknown) => `扫描失败: ${e}`,
+		subsHeatEmpty: "该窗口没有用量（←→ 换周期看别的）",
+		subsDaily: "近 30 天",
+		subsDailyTotal: (total: string, peak: string) =>
+			`共 ${total} · 峰值 ${peak}/天`,
+		subsPeakPerDay: (peak: string) => `峰值 ${peak}/天`,
 	},
 	en: {
 		menuTitle: "Statusbar Settings",
@@ -397,6 +402,11 @@ const UI_TEXT = {
 		subsScanning: (files: number, events: number, parsed: number) =>
 			`${files} files · ${events} events${parsed ? ` · ${parsed} re-parsed` : " · all cached"}`,
 		subsScanFailed: (e: unknown) => `Scan failed: ${e}`,
+		subsHeatEmpty: "No usage in this window (←→ switch range)",
+		subsDaily: "Last 30 days",
+		subsDailyTotal: (total: string, peak: string) =>
+			`${total} total · peak ${peak}/day`,
+		subsPeakPerDay: (peak: string) => `peak ${peak}/day`,
 	},
 } as const;
 
@@ -1775,6 +1785,60 @@ function heatGridMax(grid: HeatGrid, metric: "tokens" | "costUSD"): number {
 	return max;
 }
 
+// ---------- 面板可视化辅助（柱状条 / sparkline / 花费着色） ----------
+
+/** 水平比例条：v/max 占比，宽 width 列。fractional block 字符提供 1/8 列分辨率，
+ *  空格补满让每列严格对齐；0 值画淡占位点而不是空白，免得「没用量」和「渲染丢了」分不出来 */
+const BAR_EIGHTHS = ["▏", "▎", "▍", "▌", "▋", "▊", "▉"] as const;
+function barLine(v: number, max: number, width: number): string {
+	if (width <= 0) return "";
+	if (!(v > 0) || !(max > 0)) return "·".repeat(width);
+	const total = Math.min(1, Math.max(0, v / max)) * width;
+	const full = Math.floor(total);
+	const eighth = Math.round((total - full) * 8); // 0..8
+	let out = "█".repeat(Math.min(full, width));
+	if (full < width && eighth > 0) out += eighth === 8 ? "█" : BAR_EIGHTHS[eighth - 1];
+	return out.padEnd(width, " ");
+}
+
+/** 按本地日分桶：近 days 天每天的 tokens（最右 = 今天） */
+function dailyBuckets(events: SubEvent[], days: number, now: number): number[] {
+	const buckets = new Array<number>(days).fill(0);
+	const dayStart = (t: number) => {
+		const d = new Date(t);
+		return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+	};
+	const today = dayStart(now);
+	for (const ev of events) {
+		const idx = days - 1 + Math.round((dayStart(ev.t) - today) / DAY_MS);
+		if (idx < 0 || idx >= days) continue;
+		buckets[idx] += ev.i + ev.o + ev.cr + ev.cw;
+	}
+	return buckets;
+}
+
+const SPARK = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"] as const;
+/** sparkline：值归一到 [0,7]；0 值画 ▁ 而不是空，「没用量」的天也要可读 */
+function sparkline(values: number[]): string {
+	const max = Math.max(0, ...values);
+	return values
+		.map((v) =>
+			SPARK[
+				v <= 0 || max <= 0 ? 0 : Math.min(7, Math.max(1, Math.round((v / max) * 7)))
+			],
+		)
+		.join("");
+}
+
+/** 花费按量级着主题色：0 淡显；≥10 黄；≥100 红（一眼看出谁在烧钱） */
+type CostTone = "dim" | "text" | "warning" | "error";
+function costTone(costUSD: number): CostTone {
+	if (!(costUSD > 0)) return "dim";
+	if (costUSD >= 100) return "error";
+	if (costUSD >= 10) return "warning";
+	return "text";
+}
+
 export default function (pi: ExtensionAPI) {
 	// 用户开关：/statusbar 切换；新会话按此恢复
 	let userWants = true;
@@ -2058,6 +2122,12 @@ export default function (pi: ExtensionAPI) {
 			this.cachedLines = undefined;
 		}
 
+		/** 第一个「窗口内有事件」的窗口下标（额度窗口在前、固定四档在后的展示顺序）；全空返回 0 */
+		private firstWindowIdxWithData(windows: WindowStats[]): number {
+			const idx = windows.findIndex((w) => w.tokens > 0 || w.requests > 0);
+			return idx >= 0 ? idx : 0;
+		}
+
 		/** 首次载入后把光标落在 30d 用量最大的订阅上：配置顺序里第一条可能没有近期用量，
 		 *  死守第 0 行会让面板一打开就是空热力图（首屏观感差）。❯ 标记会明确当前选中的是哪一行 */
 		initSelection(): void {
@@ -2071,7 +2141,7 @@ export default function (pi: ExtensionAPI) {
 				}
 			});
 			this.sel = best;
-			this.heatIdx = 0;
+			this.heatIdx = this.firstWindowIdxWithData(this.rows[best]?.windows ?? []);
 		}
 
 		handleInput(data: string): void {
@@ -2087,13 +2157,13 @@ export default function (pi: ExtensionAPI) {
 			if (n > 0) {
 				if (matchesKey(data, "up")) {
 					this.sel = (this.sel + n - 1) % n;
-					this.heatIdx = 0;
+					this.heatIdx = this.firstWindowIdxWithData(this.rows[this.sel]?.windows ?? []);
 					this.invalidate();
 					return;
 				}
 				if (matchesKey(data, "down")) {
 					this.sel = (this.sel + 1) % n;
-					this.heatIdx = 0;
+					this.heatIdx = this.firstWindowIdxWithData(this.rows[this.sel]?.windows ?? []);
 					this.invalidate();
 					return;
 				}
@@ -2203,40 +2273,61 @@ export default function (pi: ExtensionAPI) {
 			const detail = this.renderDetail(sel, width);
 			const heat = this.renderHeat(sel, width);
 
-			// 高度自适应：超预算先砍热力图，再砍明细表，最后砍提示行
-			// 高度自适应：超预算先砍热力图，再砍明细表，最后砍提示行。
-			// 预算就是整个终端高度：面板占满整屏（fill() 会补齐空白行），不用给底层留位
+			// 高度自适应：顺序 列表 → 热力图 → 明细 → 提示；优先级 head > list > heat > hint > detail。
+			// 热力图是这个面板的 hero，绝不能被明细表挤掉（旧版第一个砍热力图，而额度窗口越多的
+			// 订阅明细越长，于是 GLM/OpenCode 这类订阅恰好丢热力图）。
+			// 超预算时：1) 按行裁明细 → 2) 明细整段丢 → 3) 丢提示 → 4) 裁热力图尾部 → 5) 只剩列表。
 			const budget = Math.max(12, this.heightOf());
-			let body = [...head, ...list, ...detail, ...heat, ...hint];
+			let body = [...head, ...list, ...heat, ...detail, ...hint];
+			if (body.length > budget) {
+				const availDetail =
+					budget - head.length - list.length - heat.length - hint.length;
+				body =
+					availDetail >= 4
+						? [...head, ...list, ...heat, ...detail.slice(0, availDetail), ...hint]
+						: [...head, ...list, ...heat, ...hint];
+			}
+			if (body.length > budget) body = [...head, ...list, ...heat];
 			if (body.length > budget)
-				body = [...head, ...list, ...detail, ...hint];
-			if (body.length > budget)
-				body = [...head, ...list, ...hint];
-			if (body.length > budget) body = [...head, ...list];
+				body = [
+					...head,
+					...list,
+					...heat.slice(0, Math.max(0, budget - head.length - list.length)),
+				];
+			if (body.length > budget) body = [...head, ...list].slice(0, budget);
 			return body;
 		}
 
-		/** 订阅列表：名称 | today/24h/7d/30d tokens | 7d/30d 费用 | 额度% */
+		/** 订阅列表：名称 | 30d 占比条 | today/24h/7d/30d tokens | 7d/30d 费用 | 额度% */
 		private renderList(width: number): string[] {
 			const th = this.theme;
 			const T = t();
 			const nameW = Math.max(12, Math.min(24, Math.floor(width * 0.2)));
 			const tW = 9;
 			const cW = 8;
+			const barW = 10;
 			const hasQuota = this.rows.some((r) =>
 				r.windows.some((w) => w.percent != null),
 			);
+			const tokensOf = (r: SubStats, key: string) =>
+				r.windows.find((w) => w.key === key)?.tokens ?? 0;
+			// 占比条以 30d tokens 的最大者为满格：一眼看出谁在用
+			const max30d = Math.max(0, ...this.rows.map((r) => tokensOf(r, "30d")));
 			const fixedW = nameW + tW * FIXED_WINDOWS.length + cW * 2;
 			const showCost = width >= fixedW + 10;
+			const showBar = width >= fixedW + barW + 10;
 			// 额度列只在真有额度数据时才占位（否则表头会出现一个永远空白的列）
 			const quotaW = hasQuota
-				? Math.max(0, width - fixedW - (showCost ? 0 : 0) - 1)
+				? Math.max(0, width - fixedW - (showBar ? barW : 0) - 1)
 				: 0;
 
 			const header: Cell[] = [
 				{ text: T.subsHeaderName, w: nameW },
-				...FIXED_WINDOWS.map((w) => ({ text: w.key, w: tW, right: true })),
 			];
+			if (showBar) header.push({ text: "", w: barW });
+			header.push(
+				...FIXED_WINDOWS.map((w) => ({ text: w.key, w: tW, right: true })),
+			);
 			if (showCost) {
 				header.push({ text: "7d $", w: cW, right: true });
 				header.push({ text: "30d $", w: cW, right: true });
@@ -2251,6 +2342,15 @@ export default function (pi: ExtensionAPI) {
 				const name = isSel ? th.fg("text", nameRaw) : th.fg("muted", nameRaw);
 				const cells: Cell[] = [
 					{ text: `${marker}${name}`, w: nameW },
+				];
+				if (showBar) {
+					const bar = barLine(tokensOf(r, "30d"), max30d, barW - 1);
+					cells.push({
+						text: isSel ? th.fg("accent", bar) : th.fg("muted", bar),
+						w: barW,
+					});
+				}
+				cells.push(
 					...FIXED_WINDOWS.map((fw) => {
 						const w = r.windows.find((x) => x.key === fw.key);
 						return {
@@ -2259,11 +2359,19 @@ export default function (pi: ExtensionAPI) {
 							right: true,
 						};
 					}),
-				];
+				);
 				if (showCost) {
 					for (const k of ["7d", "30d"]) {
 						const w = r.windows.find((x) => x.key === k);
-						cells.push({ text: w ? fmtCostShort(w.costUSD) : "—", w: cW, right: true });
+						if (w) {
+							cells.push({
+								text: th.fg(costTone(w.costUSD), fmtCostShort(w.costUSD)),
+								w: cW,
+								right: true,
+							});
+						} else {
+							cells.push({ text: "—", w: cW, right: true });
+						}
 					}
 				}
 				if (quotaW > 6 && hasQuota) {
@@ -2279,7 +2387,7 @@ export default function (pi: ExtensionAPI) {
 			return out;
 		}
 
-		/** 选中订阅的逐周期明细表 */
+		/** 选中订阅的逐周期明细：近 30 天 sparkline + 按周期表格 */
 		private renderDetail(sel: SubStats, width: number): string[] {
 			const th = this.theme;
 			const T = t();
@@ -2288,6 +2396,16 @@ export default function (pi: ExtensionAPI) {
 				out.push(th.fg("dim", T.subsNoEvents));
 				return out;
 			}
+			// 近 30 天按天 sparkline：最能消除「纯数字」观感的一行
+			const daily = dailyBuckets(sel.events, 30, Date.now());
+			const dayTotal = daily.reduce((a, b) => a + b, 0);
+			const dayPeak = Math.max(0, ...daily);
+			out.push(
+				`${th.fg("dim", T.subsDaily.padEnd(8))} ${th.fg("accent", sparkline(daily))}  ${th.fg(
+					"dim",
+					T.subsDailyTotal(fmtTokensShort(dayTotal), fmtTokensShort(dayPeak)),
+				)}`,
+			);
 			const cols: Cell[] = [
 				{ text: "", w: 7 },
 				{ text: "tokens", w: 10, right: true },
@@ -2299,15 +2417,19 @@ export default function (pi: ExtensionAPI) {
 				{ text: "used", w: 8, right: true },
 			];
 			out.push(th.fg("dim", cellsToLine(cols, width)));
+			// 表头下加一条细分隔线，让表与表头分层
+			out.push(th.fg("dim", "─".repeat(Math.min(width, 70))));
 			for (const w of sel.windows) {
 				const used =
 					w.percent == null
 						? "—"
 						: `${Math.round(w.percent)}%${w.aligned ? "⟲" : ""}`;
+				// 窗口 key 着色：对齐了真实额度边界的用 accent，纯滚动的用 muted
+				const keyText = w.aligned ? th.fg("accent", w.key) : th.fg("muted", w.key);
 				out.push(
 					cellsToLine(
 						[
-							{ text: w.key, w: 7 },
+							{ text: keyText, w: 7 },
 							{ text: fmtTokensShort(w.tokens), w: 10, right: true },
 							{ text: fmtTokensShort(w.input), w: 9, right: true },
 							{ text: fmtTokensShort(w.output), w: 9, right: true },
@@ -2316,7 +2438,7 @@ export default function (pi: ExtensionAPI) {
 								w: 10,
 								right: true,
 							},
-							{ text: fmtCost(w.costUSD), w: 10, right: true },
+							{ text: th.fg(costTone(w.costUSD), fmtCost(w.costUSD)), w: 10, right: true },
 							{ text: `${w.requests}`, w: 7, right: true },
 							{ text: used, w: 8, right: true },
 						],
@@ -2352,16 +2474,18 @@ export default function (pi: ExtensionAPI) {
 			const T = t();
 			if (!sel.windows.length) return [];
 			const w = sel.windows[Math.min(this.heatIdx, sel.windows.length - 1)];
+			const unit = this.heatMetric === "tokens" ? T.subsTokens : T.subsCost;
+			const header = this.rule(
+				`${T.subsHeatmap} · ${w.key} · ${unit}${w.aligned ? " · ⟲对齐额度窗口" : ""}`,
+				width,
+			);
+			// 窗口内 0 事件：明确提示，不要只画一片 · 让人以为坏了
+			if (w.tokens <= 0 && w.requests <= 0) {
+				return ["", header, th.fg("dim", `   ${T.subsHeatEmpty}`)];
+			}
 			const grid = buildHeatGrid(sel.events, w.since, w.until, subEventCost);
 			const max = heatGridMax(grid, this.heatMetric);
-			const unit = this.heatMetric === "tokens" ? T.subsTokens : T.subsCost;
-			const out: string[] = [
-				"",
-				this.rule(
-					`${T.subsHeatmap} · ${w.key} · ${unit}${w.aligned ? " · ⟲对齐额度窗口" : ""}`,
-					width,
-				),
-			];
+			const out: string[] = ["", header];
 			// 小时刻度：24 列里在 0/6/12/18 处放标签
 			const hourChars = new Array<string>(24).fill(" ");
 			for (const h of [0, 6, 12, 18])
@@ -2373,13 +2497,20 @@ export default function (pi: ExtensionAPI) {
 					: ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
 			for (let d = 0; d < 7; d++) {
 				let row = "";
+				let rowTotal = 0;
 				for (let h = 0; h < 24; h++) {
 					const cell = grid[d][h];
 					const v = this.heatMetric === "tokens" ? cell.tokens : cell.costUSD;
+					rowTotal += v;
 					const lvl = heatLevel(v, max);
 					row += th.fg(HEAT_COLORS[lvl], HEAT_GLYPHS[lvl]);
 				}
-				out.push(`${th.fg("dim", days[d].padStart(2))} ${row}`);
+				// 行尾加该周几的合计：让每天之间的相对量级不用逐格读
+				const totalTxt =
+					this.heatMetric === "tokens" ? fmtTokensShort(rowTotal) : fmtCostShort(rowTotal);
+				out.push(
+					`${th.fg("dim", days[d].padStart(2))} ${row}  ${th.fg("dim", totalTxt.padStart(6))}`,
+				);
 			}
 			out.push(
 				th.fg(
