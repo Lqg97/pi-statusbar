@@ -2126,7 +2126,7 @@ export default function (pi: ExtensionAPI) {
 		render(width: number): string[] {
 			// 渲染期异常绝不允许冒泡：pi 会当未捕获异常直接退出进程
 			try {
-				const h = this.heightOf();
+				const h = Math.max(1, this.heightOf());
 				if (
 					this.cachedLines &&
 					this.cachedW === width &&
@@ -2134,7 +2134,7 @@ export default function (pi: ExtensionAPI) {
 					this.cachedRev === this.rev
 				)
 					return this.cachedLines;
-				const lines = this.renderBody(width);
+				const lines = this.fill(this.renderBody(width), width, h);
 				this.cachedW = width;
 				this.cachedH = h;
 				this.cachedRev = this.rev;
@@ -2143,6 +2143,25 @@ export default function (pi: ExtensionAPI) {
 			} catch (e) {
 				return [truncateToWidth(`订阅面板渲染失败: ${e}`, width)];
 			}
+		}
+
+		/**
+		 * 把内容铺满整屏（width × height）。
+		 * 为什么必须铺满：overlay 只盖住自己那几行几列，**没盖到的行列会漏出底层画面**，
+		 * 而 fullscreen（alt-screen）下底层是新会话的启动帮助文本，漏出来就是一行行碎片
+		 * （实测每行第 0 列漏一个字符：[ / a / c / p / r …，热力图右侧空白也漏）。
+		 * 所以不再“给右侧分栏让位”（那正好把第 0 列和右侧几列让成了漏点），而是整屏盖满，
+		 * 面板自己把每行 pad 到 width、把行数补到 height。
+		 */
+		private fill(lines: string[], width: number, height: number): string[] {
+			const out = lines.slice(0, height).map((l) => {
+				const w = visibleWidth(l);
+				if (w >= width) return truncateToWidth(l, width);
+				return l + " ".repeat(width - w);
+			});
+			const blank = " ".repeat(Math.max(0, width));
+			while (out.length < height) out.push(blank);
+			return out;
 		}
 
 		private metaLine(): string {
@@ -2185,7 +2204,9 @@ export default function (pi: ExtensionAPI) {
 			const heat = this.renderHeat(sel, width);
 
 			// 高度自适应：超预算先砍热力图，再砍明细表，最后砍提示行
-			const budget = Math.max(12, this.heightOf() - 2);
+			// 高度自适应：超预算先砍热力图，再砍明细表，最后砍提示行。
+			// 预算就是整个终端高度：面板占满整屏（fill() 会补齐空白行），不用给底层留位
+			const budget = Math.max(12, this.heightOf());
 			let body = [...head, ...list, ...detail, ...heat, ...hint];
 			if (body.length > budget)
 				body = [...head, ...list, ...detail, ...hint];
@@ -2380,9 +2401,6 @@ export default function (pi: ExtensionAPI) {
 
 		let comp: SubsDashboardComponent | null = null;
 		let selectionInitialized = false;
-		// showOverlay 只在打开时调一次 overlayOptions，而 factory 的参数 tui 作用域走不出 factory，
-		// 所以先存一份给 overlayOptions 用（factory 先同步执行，overlayOptions 在其 .then 里才被调）
-		let overlayTui: TUI | null = null;
 		const load = async (tui: TUI, force: boolean): Promise<void> => {
 			const c = comp;
 			if (!c) return;
@@ -2420,7 +2438,6 @@ export default function (pi: ExtensionAPI) {
 
 		await ctx.ui.custom<void>(
 			(tui, theme, _kb, done) => {
-				overlayTui = tui;
 				comp = new SubsDashboardComponent(
 					theme,
 					done,
@@ -2432,37 +2449,16 @@ export default function (pi: ExtensionAPI) {
 			},
 			{
 				overlay: true,
-				// 右侧面板（分栏列 / 浮层）与面板同屏会互相覆盖，所以它可见时给它让出
-				// rightWidth 并在右侧留 3 列余量，同时改成靠左对齐。
-				// （不能让右侧面板暂时隐藏：layout=split 是真实分栏列，不是能 visible=false 的浮层）
-				// 用百分比而不是绝对列数：overlayOptions 只在打开时调一次，绝对宽度在之后
-				// resize 时不会重算；百分比由 pi-tui 每次布局按当前列数换算。
-				overlayOptions: (): OverlayOptions => {
-					const cols = overlayTui?.terminal.columns ?? 120;
-					const rightPanelShown =
-						userWants &&
-						(layoutMode === "split"
-							? splitWidthOk(cols)
-							: panelActive(cols));
-					if (!rightPanelShown)
-						return { anchor: "center", width: "94%", maxHeight: "90%" };
-					const pct = Math.max(
-						50,
-						Math.min(
-							94,
-							Math.round(
-								((cols - config.rightWidth - 3) / cols) * 100,
-							),
-						),
-					);
-					return {
-						anchor: "left-center",
-						width: `${pct}%`,
-						minWidth: 40,
-						maxHeight: "90%",
-						margin: { left: 1 },
-					};
-				},
+				// 整屏铺满（面板自己会把每行 pad 到 width、行数补到 height，见 fill()）。
+				// 不能缩宽“给右侧分栏让位”：overlay 没盖到的行列会漏出底层画面，
+				// fullscreen（alt-screen）下底层是新会话的启动帮助文本，
+				// 实测漏出来就是一行行碎片（每行第 0 列一个字符 + 热力图右侧空白）。
+				// 铺满后没有缝隙可漏；右侧状态面板在面板开着时被盖住，Esc 退出后自然恢复。
+				overlayOptions: (): OverlayOptions => ({
+					anchor: "center",
+					width: "100%",
+					maxHeight: "100%",
+				}),
 			},
 		);
 	}

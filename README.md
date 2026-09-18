@@ -38,6 +38,7 @@ main │ ↑12.3k ↓45.6k ⚡100k·85% $0.123 ⏱980ms 128 tok/s │ ▰▰▰�
   - **数据源**：只扫 pi 自己的会话日志目录 `~/.pi/agent/sessions`（递归所有 `.jsonl`），**不依赖 ai-sub-dashboard 在跑**。只统计 `type=message` 的 assistant 行，按消息 id 跨文件去重（pi 的 `/tree` fork 会把历史消息整段复制进新 session，实测不先去重会多算约 10%）。同目录下 `subagent-artifacts/` 的 `recordType` 结构天然被排除，不会重复计数
   - **费用口径**：与 footer 实时花费**同源**（`priceTable` + 阶梯定价 + 1h 缓存写规则），因此面板数与 footer 数一致；查不到单价时回落 pi 自己算的 `usage.cost.total`（实测约 97% 的消息能命中单价表）
   - **周期**：固定四档 `today` / `24h` / `7d` / `30d`，外加**额度窗口**——GLM / Kimi / OpenCode Go / MiniMax 的实时额度接口会带回窗口长度与重置时刻，面板用 `resetAt - spanMs` 反推窗口起点，因此「5h 窗口已用 token」与官方百分比是同一个窗口（明细表里带 `⟲` 标记）；没有额度接口的订阅可用 `subscriptions[].quotaWindows` 手工声明
+  - **整屏覆盖**：面板把每行 pad 到终端宽、行数补到终端高，**铺满整屏**。这不是为了好看：overlay 只盖住自己那几行几列，**没盖到的行列会漏出底层画面**，而 fullscreen（alt-screen）下底层是新会话的启动帮助文本，漏出来就是一行行碎片（实测每行第 0 列漏一个字符 `[`/`a`/`c`/`p`/`r`…，热力图右侧空白也漏）。所以右侧状态面板在面板开着时会被盖住，`Esc` 退出后自动恢复；终端高度不足时按 热力图 → 明细 → 提示 的顺序降级
   - **面板操作**：`↑↓` 选订阅 · `←→` 换热力图周期 · `h` 切 tokens/费用 · `r` 强制重扫 · `Esc`/`q` 关闭
   - **性能**：扫描结果按文件 `mtime`+`size` 增量缓存到 `~/.pi/agent/.statusbar-subs-cache.json`；热启动约 10ms，首次全量约 0.5s（实测 133MB / 137 文件 / 约 1.2 万条唯一消息），期间每 8 个文件让出一次事件循环，不卡 TUI
 - **终端标题**：会话名写入终端标题（`pi · 会话名`），不占 footer 宽度（VSCode/Cursor 内置终端看不到时见「排障」）
