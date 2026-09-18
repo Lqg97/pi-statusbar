@@ -2026,6 +2026,9 @@ export default function (pi: ExtensionAPI) {
 		private heatMetric: "tokens" | "costUSD" = "tokens";
 		private cachedW?: number;
 		private cachedRev = -1;
+		/** 高度也要进缓存键：内容会按终端行数降级（先砍热力图、再砍明细），
+		 *  只盯 width 的话拖高/拖矮终端会拿到旧行数布局。菜单面板内容是固定行数所以不受这影响 */
+		private cachedH = -1;
 		private cachedLines?: string[];
 
 		constructor(
@@ -2091,14 +2094,17 @@ export default function (pi: ExtensionAPI) {
 		render(width: number): string[] {
 			// 渲染期异常绝不允许冒泡：pi 会当未捕获异常直接退出进程
 			try {
+				const h = this.heightOf();
 				if (
 					this.cachedLines &&
 					this.cachedW === width &&
+					this.cachedH === h &&
 					this.cachedRev === this.rev
 				)
 					return this.cachedLines;
 				const lines = this.renderBody(width);
 				this.cachedW = width;
+				this.cachedH = h;
 				this.cachedRev = this.rev;
 				this.cachedLines = lines;
 				return lines;
