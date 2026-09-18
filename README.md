@@ -33,13 +33,15 @@ main │ ↑12.3k ↓45.6k ⚡100k·85% $0.123 ⏱980ms 128 tok/s │ ▰▰▰�
   | DeepSeek · OpenRouter · Moonshot 开放平台 · SiliconFlow · StepFun · Novita AI | 按量账户余额（按量计费，无重置概念） |
 
   每个窗口用量后括注恢复倒计时（`45s` / `13m` / `2h13m` / `6d4h`：不足 24h 按 `xhyym`，超 24h 按 `xdyyh`，渲染时按重置时刻实时换算，时刻缺失则不显示）；底部单行各窗口用 `·` 连接，右侧面板逐窗口分行。`/statusbar quota` 强制刷新并显示详情（含各窗口「重置于 2026-09-15 15:45（3h56m）」）
-- **订阅用量统计（`/statusbar subs`）**：全屏面板，按订阅列出各周期消耗的 **token 数与 API 等价费用**，并带 **7×24 热力图**。
+- **订阅用量统计（`/statusbar subs`）**：**贴编辑器上方的 widget**，按订阅列出各周期消耗的 **token 数与 API 等价费用**，并带 **7×24 热力图**。
 
   - **数据源**：只扫 pi 自己的会话日志目录 `~/.pi/agent/sessions`（递归所有 `.jsonl`），**不依赖 ai-sub-dashboard 在跑**。只统计 `type=message` 的 assistant 行，按消息 id 跨文件去重（pi 的 `/tree` fork 会把历史消息整段复制进新 session，实测不先去重会多算约 10%）。同目录下 `subagent-artifacts/` 的 `recordType` 结构天然被排除，不会重复计数
   - **费用口径**：与 footer 实时花费**同源**（`priceTable` + 阶梯定价 + 1h 缓存写规则），因此面板数与 footer 数一致；查不到单价时回落 pi 自己算的 `usage.cost.total`（实测约 97% 的消息能命中单价表）
   - **周期**：固定四档 `today` / `24h` / `7d` / `30d`，外加**额度窗口**——GLM / Kimi / OpenCode Go / MiniMax 的实时额度接口会带回窗口长度与重置时刻，面板用 `resetAt - spanMs` 反推窗口起点，因此「5h 窗口已用 token」与官方百分比是同一个窗口（明细表里带 `⟲` 标记）；没有额度接口的订阅可用 `subscriptions[].quotaWindows` 手工声明
-  - **整屏覆盖**：面板把每行 pad 到终端宽、行数补到终端高，**铺满整屏**。这不是为了好看：overlay 只盖住自己那几行几列，**没盖到的行列会漏出底层画面**，而 fullscreen（alt-screen）下底层是新会话的启动帮助文本，漏出来就是一行行碎片（实测每行第 0 列漏一个字符 `[`/`a`/`c`/`p`/`r`…，热力图右侧空白也漏）。所以右侧状态面板在面板开着时会被盖住，`Esc` 退出后自动恢复；终端高度不足时按 热力图 → 明细 → 提示 的顺序降级
-  - **面板操作**：`↑↓` 选订阅 · `←→` 换热力图周期 · `h` 切 tokens/费用 · `r` 强制重扫 · `Esc`/`q` 关闭
+  - **为什么是 widget 而不是 overlay**：形态参考 pi-subagents 的 agent 面板（`ctx.ui.setWidget`，key `subagent-async`）。widget 是**真布局组件**，聊天与右侧状态面板都不被遮，也就不存在「overlay 没盖到的行列漏出底层 alt-screen 内容」那一类 bug（overlay 时代得靠把内容 pad 满整屏硬压）。代价是 **widget 拿不到键盘**——实测按 `↓`/`j`/`Esc` 后组件的 `handleInput` 调用次数始终为 0（焦点在编辑器上），所以交互只有鼠标 + 子命令：
+  - **交互**：**行 0 点击**折叠/展开（折叠后是一行摘要：订阅数 · 30d 合计 token 与费用）；其余全部走子命令 —— `next`/`prev` 切订阅、`range` 切热力图周期、`metric` 切指标、`refresh` 重扫、`collapse`/`expand`
+  - **高度**：最多 `subsMaxLines` 行（默认 20），且不超过终端高度的 60%（给聊天/编辑器/页脚留地方）。**热力图优先占位**（它是这个面板的 hero）；订阅列表是**视窗**——选中行始终可见，表头标出当前范围（如 `订阅 2-5/10`），所以 `next`/`prev` 能走遍所有订阅；内容被截断时末行会明说，不做静默截断
+  - **与「Agent 面板入栏」的关系**：subs widget 需要整宽（表格约 110 列），而入栏的右栏默认 32 列，所以 **subs widget 可见时不会把 widget 容器搬进右栏**；关闭后自动恢复入栏
   - **性能**：扫描结果按文件 `mtime`+`size` 增量缓存到 `~/.pi/agent/.statusbar-subs-cache.json`；热启动约 10ms，首次全量约 0.5s（实测 133MB / 137 文件 / 约 1.2 万条唯一消息），期间每 8 个文件让出一次事件循环，不卡 TUI
 - **终端标题**：会话名写入终端标题（`pi · 会话名`），不占 footer 宽度（VSCode/Cursor 内置终端看不到时见「排障」）
 - **窄终端自适应**：按 扩展状态 → 额度/token → 模型 的顺序逐段收起，仍放不下时整段换行成多行（分支与上下文永不丢弃）
@@ -113,6 +115,8 @@ pi remove git:github.com/Lqg97/pi-statusbar
  "hiddenMetrics": [],
  // 配置面板显示语言："zh" / "en"（默认 zh），/statusbar 菜单语言行 ←→ 切换
  "language": "zh",
+ // /statusbar subs widget 最多占几行（默认 20，范围 [4, 60]）；实际生效值还会被「终端高度 60%」再压一道
+ "subsMaxLines": 20,
  // 订阅列表（/statusbar subs 的统计口径）；缺省空数组 = 面板只显示「未归属」汇总
  // 归属：providerFilter 全局优先于 modelFilter，同层按配置顺序先到先得；两者都缺省的条目永不自动归属
  "subscriptions": [
@@ -144,7 +148,7 @@ pi remove git:github.com/Lqg97/pi-statusbar
 
 ### 订阅用量统计（`subscriptions`）
 
-`/statusbar subs` 打开的全屏面板，按订阅展示各周期 token 与 API 等价费用 + 7×24 热力图。配置只需在 `statusbar.json` 加一个 `subscriptions` 数组（见上面的配置示例）：
+`/statusbar subs` 打开的 widget（贴编辑器上方，不遮挡聊天），按订阅展示各周期 token 与 API 等价费用 + 7×24 热力图。配置只需在 `statusbar.json` 加一个 `subscriptions` 数组（见上面的配置示例）：
 
 | 字段 | 说明 |
 | --- | --- |
@@ -205,7 +209,12 @@ regular 模式下选 `split` 不会报错，而是退回底部单行、且**不�
 | `/statusbar fill [on\|off]` | 分栏面板是否铺满整屏高度（写回 `panelFill` 并立即重绘），不带参数时取反；只对 `layout: split` 生效 |
 | `/statusbar dock [on\|off]` | split 分栏时把 agent 面板（pi-subagents 的异步任务 widget）搬进右栏（写回 `dockWidgetsInSplit` 并立即重排），不带参数时取反 |
 | `/statusbar metrics` | 直接进入指标显隐交互式配置 |
-| `/statusbar subs` | 打开订阅用量统计面板（各周期 token / API 等价费用 + 7×24 热力图；`↑↓` 选订阅、`←→` 换热力图周期、`h` 切 tokens/费用、`r` 重扫、`Esc` 关闭） |
+| `/statusbar subs` | 打开/关闭订阅用量统计 widget（各周期 token / API 等价费用 + 7×24 热力图）；**行 0 点击**折叠成一行摘要 |
+| `/statusbar subs next\|prev` | 切换选中的订阅（列表是视窗，选中行始终可见） |
+| `/statusbar subs range [next\|prev\|<周期>]` | 切换热力图周期（默认会自动跳过「窗口内 0 事件」的窗口） |
+| `/statusbar subs metric [tokens\|cost]` | 切换热力图指标（不带参数 = 取反） |
+| `/statusbar subs refresh` | 强制重扫会话日志（绕过缓存） |
+| `/statusbar subs collapse\|expand` | 折叠成一行摘要 / 展开 |
 | `/statusbar quota` | 强制刷新订阅额度并显示详情 |
 | `/statusbar prices` | 强制刷新实时单价并显示当前模型单价来源 |
 | `/exit` | 退出 pi（`/quit` 的别名） |
