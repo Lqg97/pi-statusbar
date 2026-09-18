@@ -13,7 +13,7 @@
  * - 上下文占用 ≥75% 变黄，≥90% 变红
  * - 订阅额度自动发现（按 provider baseUrl 匹配，只显示当前模型所属 provider 的额度）：
  *     GLM Coding Plan（bigmodel.cn / z.ai）      → 5h/周 token 窗口百分比 + 恢复倒计时
- *     Kimi（api.kimi.com）                       → 短窗口/周配额百分比 + 恢复倒计时
+ *     Kimi（api.kimi.com）                       → 短窗口/周/月配额百分比 + 恢复倒计时
  *     DeepSeek 余额（deepseek.com）              → 按量账户余额（无重置概念）
  *     OpenRouter 额度（openrouter.ai）           → 剩余 credits（无重置概念）
  *     OpenCode Go（opencode.ai/zen/go）          → 5h/周/月三窗口已用百分比 + 恢复倒计时
@@ -614,6 +614,20 @@ function glmWindowLabel(unit: number, num: number): string {
 	return `u${unit}:${num}`;
 }
 
+/** Kimi usages 对象的窗口 key → 展示标签；不认识返回 null（月付套餐有 limit_month_total/limit_month_code） */
+function kimiUsageLabel(key: string): string | null {
+	if (key === "limit_month_total") return "月";
+	if (key === "limit_month_code") return "月编程";
+	const h = /^limit_(\d+)h$/.exec(key);
+	if (h) return `${parseInt(h[1], 10)}h`;
+	const d = /^limit_(\d+)d$/.exec(key);
+	if (d) {
+		const days = parseInt(d[1], 10);
+		return days % 7 === 0 ? (days === 7 ? "周" : `${days / 7}周`) : `${days}天`;
+	}
+	return null;
+}
+
 const FETCH_TIMEOUT_MS = 8000;
 
 /** 内置额度源（各家认证方式实测确认） */
@@ -634,6 +648,7 @@ const QUOTA_SOURCES: QuotaSource[] = [
 			const parts: string[] = [];
 			const rows: QuotaRow[] = [];
 			let maxPercent: number | undefined;
+			const shownLabels = new Set<string>();
 
 			// 短窗口（如 5 小时）；detail 可能只有 remaining 没有 used
 			const UNIT_SEC: Record<string, number> = {
@@ -662,6 +677,7 @@ const QUOTA_SOURCES: QuotaSource[] = [
 				parts.push(text);
 				rows.push({ text, percent: pct });
 				maxPercent = Math.max(maxPercent ?? 0, pct);
+				shownLabels.add(label);
 			}
 			// 周配额
 			const weekLimit = parseFloat(usage.limit);
@@ -672,6 +688,24 @@ const QUOTA_SOURCES: QuotaSource[] = [
 				parts.push(text);
 				rows.push({ text, percent: pct });
 				maxPercent = Math.max(maxPercent ?? 0, pct);
+				shownLabels.add("周");
+			}
+			// usages 补充窗口：月付套餐没有 usage 周字段，额度在 usages.limit_*
+			//（used_ratio 为 0~1 已用比例）；与 limits[]/usage 已展示的窗口按标签去重
+			const detailAdds: { label: string; pct: number; at?: number }[] = [];
+			for (const [key, w] of Object.entries(json?.usages ?? {})) {
+				const label = kimiUsageLabel(key);
+				if (!label || shownLabels.has(label)) continue;
+				const ratio = parseFloat((w as any)?.used_ratio);
+				if (!Number.isFinite(ratio)) continue;
+				const pct = ratio * 100;
+				const at = toResetAt((w as any)?.reset_time);
+				const text = withReset(`${label} ${Math.round(pct)}%`, at);
+				parts.push(text);
+				rows.push({ text, percent: pct });
+				maxPercent = Math.max(maxPercent ?? 0, pct);
+				shownLabels.add(label);
+				detailAdds.push({ label, pct, at });
 			}
 			if (parts.length === 0) return { seg: null, detail: "响应中无用量数据" };
 
@@ -684,6 +718,8 @@ const QUOTA_SOURCES: QuotaSource[] = [
 			}
 			if (weekLimit > 0)
 				detail += `\n  周配额: ${usage.used}/${usage.limit}${resetDetail(toResetAt(usage.resetTime))}`;
+			for (const a of detailAdds)
+				detail += `\n  ${a.label}窗口: 已用 ${Math.round(a.pct)}%${resetDetail(a.at)}`;
 			if (json?.limited) detail += "\n  ⚠ 当前限流中";
 			return {
 				seg: { text: `Kimi ${parts.join("·")}`, rows, maxPercent },
