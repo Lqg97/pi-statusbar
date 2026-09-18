@@ -2093,6 +2093,22 @@ export default function (pi: ExtensionAPI) {
 		return truncateToWidth(out, maxWidth);
 	}
 
+	/**
+	 * 把额度摘要片段（"5h 42%"）拼到可用宽度内，放不下就从**尾部**丢弃，
+	 * 并补一个 `+N` 明确告知还有几个窗口没显示（避免看上去像“窗口凭空少了”）。
+	 * 为什么不直接交给 truncateToWidth：它会把尾段切成 "月编..."，看不出是哪个窗口。
+	 */
+	function fitSegments(segs: string[], width: number): string {
+		if (width <= 0 || segs.length === 0) return "";
+		const joinTo = (n: number) => segs.slice(0, n).join(" · ");
+		if (visibleWidth(joinTo(segs.length)) <= width) return joinTo(segs.length);
+		for (let n = segs.length - 1; n >= 1; n--) {
+			const cand = `${joinTo(n)} +${segs.length - n}`;
+			if (visibleWidth(cand) <= width) return cand;
+		}
+		return truncateToWidth(segs[0], width);
+	}
+
 	/** 订阅统计全屏面板：↑↓ 选订阅，←→ 选热力图周期，h 切 tokens/费用，r 重扫 */
 	class SubsDashboardComponent {
 		rows: SubStats[] = [];
@@ -2316,10 +2332,13 @@ export default function (pi: ExtensionAPI) {
 			const fixedW = nameW + tW * FIXED_WINDOWS.length + cW * 2;
 			const showCost = width >= fixedW + 10;
 			const showBar = width >= fixedW + barW + 10;
+			// 数字块与额度列之间必须留间隔，否则右对齐的费用会和额度粘成 "$32.45h 42%"
+			const quotaGap = 2;
 			// 额度列只在真有额度数据时才占位（否则表头会出现一个永远空白的列）
 			const quotaW = hasQuota
-				? Math.max(0, width - fixedW - (showBar ? barW : 0) - 1)
+				? Math.max(0, width - fixedW - (showBar ? barW : 0) - quotaGap)
 				: 0;
+			const showQuota = hasQuota && quotaW > 6;
 
 			const header: Cell[] = [
 				{ text: T.subsHeaderName, w: nameW },
@@ -2332,7 +2351,10 @@ export default function (pi: ExtensionAPI) {
 				header.push({ text: "7d $", w: cW, right: true });
 				header.push({ text: "30d $", w: cW, right: true });
 			}
-			if (quotaW > 6 && hasQuota) header.push({ text: T.subsQuotaUsed, w: quotaW });
+			if (showQuota) {
+				header.push({ text: "", w: quotaGap });
+				header.push({ text: T.subsQuotaUsed, w: quotaW });
+			}
 
 			const out: string[] = [th.fg("dim", cellsToLine(header, width))];
 			this.rows.forEach((r, i) => {
@@ -2374,12 +2396,12 @@ export default function (pi: ExtensionAPI) {
 						}
 					}
 				}
-				if (quotaW > 6 && hasQuota) {
-					const q = r.windows
+				if (showQuota) {
+					const segs = r.windows
 						.filter((w) => w.percent != null)
-						.map((w) => `${w.key} ${Math.round(w.percent!)}%`)
-						.join(" · ");
-					cells.push({ text: q, w: quotaW });
+						.map((w) => `${w.key} ${Math.round(w.percent!)}%`);
+					cells.push({ text: "", w: quotaGap });
+					cells.push({ text: fitSegments(segs, quotaW), w: quotaW });
 				}
 				out.push(cellsToLine(cells, width));
 			});
@@ -2505,7 +2527,12 @@ export default function (pi: ExtensionAPI) {
 					const lvl = heatLevel(v, max);
 					row += th.fg(HEAT_COLORS[lvl], HEAT_GLYPHS[lvl]);
 				}
-				// 行尾加该周几的合计：让每天之间的相对量级不用逐格读
+				// 行尾加该周几的合计：让每天之间的相对量级不用逐格读。
+				// 为 0 时留空：一串 0 只会干扰读图
+				if (rowTotal <= 0) {
+					out.push(`${th.fg("dim", days[d].padStart(2))} ${row}`);
+					continue;
+				}
 				const totalTxt =
 					this.heatMetric === "tokens" ? fmtTokensShort(rowTotal) : fmtCostShort(rowTotal);
 				out.push(
