@@ -104,6 +104,7 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 	type Component,
+	type OverlayOptions,
 	type TUI,
 } from "@earendil-works/pi-tui";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -1303,6 +1304,9 @@ const SUBS_CACHE_FILE = join(
 );
 /** 扫描结果缓存 TTL：TTL 内重复打开面板不重新 stat */
 const SUBS_TTL_MS = 60_000;
+/** 打开面板时等实时额度的上限（ms）：额度窗口要对齐就得先有 resetAt，
+ *  但不能为它无限等——离线/接口慢时面板就打不开了；超时先出滚动窗口 */
+const SUBS_QUOTA_WAIT_MS = 3000;
 /** 磁盘缓存格式版本：不匹配则整份丢弃重扫 */
 const SUBS_CACHE_VERSION = 1;
 const HOUR_MS = 3600_000;
@@ -1823,6 +1827,10 @@ export default function (pi: ExtensionAPI) {
 		detail: string;
 		fetchedAt: number;
 		inflight: boolean;
+		/** 进行中的请求本身。让并发调用方能真正等到结果——
+		 *  旧版在 inflight 时直接 `return`，调用方 await 到 undefined（等于没等），
+		 *  /statusbar subs 首屏就会因为额度还没回来而缺额度窗口（只有已暖过的 provider 才有） */
+		inflightTask?: Promise<void>;
 	}
 	const bindings: QuotaBinding[] = [];
 	// 以 providerId 为 key：同一额度源（如 api.kimi.com）可能挂多个 provider，
@@ -1866,24 +1874,30 @@ export default function (pi: ExtensionAPI) {
 			state = { seg: null, detail: "", fetchedAt: 0, inflight: false };
 			quotaStates.set(b.providerId, state);
 		}
-		if (state.inflight) return;
+		if (state.inflight) return state.inflightTask ?? Promise.resolve();
 		if (!force && Date.now() - state.fetchedAt < b.source.ttlMs) return;
 		state.inflight = true;
-		try {
-			const apiKey = await ctx.modelRegistry.getApiKeyForProvider(b.providerId);
-			if (!apiKey) throw new Error("provider 未配置 API key");
-			const r = await b.source.fetch(b.origin, apiKey);
-			state.seg = r.seg;
-			state.detail = r.detail;
-			state.fetchedAt = Date.now();
-		} catch (err) {
-			// 拉取失败：保留旧 seg，1 分钟后允许重试
-			state.detail = `查询失败: ${err instanceof Error ? err.message : String(err)}`;
-			state.fetchedAt = Date.now() - b.source.ttlMs + 60_000;
-		} finally {
-			state.inflight = false;
-			activeTui?.requestRender();
-		}
+		state.inflightTask = (async () => {
+			try {
+				const apiKey = await ctx.modelRegistry.getApiKeyForProvider(
+					b.providerId,
+				);
+				if (!apiKey) throw new Error("provider 未配置 API key");
+				const r = await b.source.fetch(b.origin, apiKey);
+				state.seg = r.seg;
+				state.detail = r.detail;
+				state.fetchedAt = Date.now();
+			} catch (err) {
+				// 拉取失败：保留旧 seg，1 分钟后允许重试
+				state.detail = `查询失败: ${err instanceof Error ? err.message : String(err)}`;
+				state.fetchedAt = Date.now() - b.source.ttlMs + 60_000;
+			} finally {
+				state.inflight = false;
+				state.inflightTask = undefined;
+				activeTui?.requestRender();
+			}
+		})();
+		return state.inflightTask;
 	}
 
 	// ---------- 订阅统计（/statusbar subs） ----------
@@ -2362,11 +2376,13 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify(t().noTui, "warning");
 			return;
 		}
-		// 额度窗口对齐需要实时额度：先把已绑定 provider 的额度刷一遗（受 TTL 约束，不会重复请求）
-		void Promise.all(bindings.map((b) => refreshQuota(b, ctx, false)));
+		// 额度窗口对齐需要实时额度；不在这里 fire-and-forget，交给 load() 等（它有自己的超时）
 
 		let comp: SubsDashboardComponent | null = null;
 		let selectionInitialized = false;
+		// showOverlay 只在打开时调一次 overlayOptions，而 factory 的参数 tui 作用域走不出 factory，
+		// 所以先存一份给 overlayOptions 用（factory 先同步执行，overlayOptions 在其 .then 里才被调）
+		let overlayTui: TUI | null = null;
 		const load = async (tui: TUI, force: boolean): Promise<void> => {
 			const c = comp;
 			if (!c) return;
@@ -2375,6 +2391,14 @@ export default function (pi: ExtensionAPI) {
 			c.rev++;
 			tui.requestRender();
 			try {
+				// 额度窗口对齐要用实时额度，且必须等它回来再算：
+				// 边算边长（fire-and-forget）会让首屏只拿到「已暖过」的 provider 的额度窗口。
+				// 但不能无限等（离线/接口慢时面板就打不开了），最多等 SUBS_QUOTA_WAIT_MS；
+				// 超时就先出滚动窗口，额度到了下次重开面板或 r 重扫再补。
+				await Promise.race([
+					Promise.all(bindings.map((b) => refreshQuota(b, ctx, false))),
+					new Promise((r) => setTimeout(r, SUBS_QUOTA_WAIT_MS)),
+				]);
 				const r = await ensureSubsScan(force);
 				if (!comp) return;
 				const { list, unattr } = buildAllSubStats(r.events, Date.now());
@@ -2396,6 +2420,7 @@ export default function (pi: ExtensionAPI) {
 
 		await ctx.ui.custom<void>(
 			(tui, theme, _kb, done) => {
+				overlayTui = tui;
 				comp = new SubsDashboardComponent(
 					theme,
 					done,
@@ -2407,10 +2432,36 @@ export default function (pi: ExtensionAPI) {
 			},
 			{
 				overlay: true,
-				overlayOptions: {
-					anchor: "center",
-					width: "94%",
-					maxHeight: "90%",
+				// 右侧面板（分栏列 / 浮层）与面板同屏会互相覆盖，所以它可见时给它让出
+				// rightWidth 并在右侧留 3 列余量，同时改成靠左对齐。
+				// （不能让右侧面板暂时隐藏：layout=split 是真实分栏列，不是能 visible=false 的浮层）
+				// 用百分比而不是绝对列数：overlayOptions 只在打开时调一次，绝对宽度在之后
+				// resize 时不会重算；百分比由 pi-tui 每次布局按当前列数换算。
+				overlayOptions: (): OverlayOptions => {
+					const cols = overlayTui?.terminal.columns ?? 120;
+					const rightPanelShown =
+						userWants &&
+						(layoutMode === "split"
+							? splitWidthOk(cols)
+							: panelActive(cols));
+					if (!rightPanelShown)
+						return { anchor: "center", width: "94%", maxHeight: "90%" };
+					const pct = Math.max(
+						50,
+						Math.min(
+							94,
+							Math.round(
+								((cols - config.rightWidth - 3) / cols) * 100,
+							),
+						),
+					);
+					return {
+						anchor: "left-center",
+						width: `${pct}%`,
+						minWidth: 40,
+						maxHeight: "90%",
+						margin: { left: 1 },
+					};
 				},
 			},
 		);
