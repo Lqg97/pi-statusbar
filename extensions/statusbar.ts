@@ -24,15 +24,17 @@
  *     Novita AI（novita.ai）                     → 按量账户余额（无重置概念）
  *   每个窗口用量后括注 (恢复倒计时)（45s/13m/2h13m/6d4h；不足 24h 按 xhyym，超 24h 按 xdyyh，渲染时按重置时刻实时换算）；
  *   底部单行各窗口用 · 连接，右侧面板逐窗口分行；带 TTL 缓存，失败静默；/statusbar quota 强制刷新并显示详情
- * - 订阅用量统计（/statusbar subs，或交互菜单的「订阅统计」行）：**贴编辑器上方的 widget**
- *   （不是遮满屏的 overlay），按订阅列出各周期消耗的 token 与 API 等价费用，并带 7×24 热力图。
- *     形态参考 pi-subagents 的 agent 面板（key `subagent-async`）：
- *       ctx.ui.setWidget(KEY, factory) 真布局组件 → 聊天/右侧面板都不被遮，也就不存在
- *       「overlay 没盖到的行列漏出底层 alt-screen 内容」那一类 bug；
- *       代价：widget **拿不到键盘**（实测 handleInput 永不被调用），所以交互只有
- *         鼠标（行 0 点击折叠/展开）+ 子命令（见下）；
- *       已挂载组件用**原地更新**回填数据（不能反复 setWidget：pi 用「删 key 再重插」
- *         实现替换，会把 widget 挤到其他扩展的 widget 之后）。
+ * - 订阅用量统计（/statusbar subs，或交互菜单的「订阅统计」行）：**可交互浮层**
+ *   （ctx.ui.custom + overlay: true，pi-subagents 的 fleet inspector 同款形态：居中
+ *   95% 宽 / 最多 85% 高、带边框，四周露出底层正常 UI），按订阅列出各周期消耗的
+ *   token 与 API 等价费用，并带 7×24 热力图。
+ *     键盘交互（custom 会把焦点交给 overlay 组件）：↑↓/jk 切订阅 · ←→ 切热力图周期 ·
+ *       h 切指标 · r 强制重扫 · Esc/q/ctrl+c 关闭；
+ *     选中订阅的列表是视窗（❯ 始终可见，表头标当前范围），热力图自动跳过「窗口内 0 事件」
+ *       的周期；
+ *     高度自己算：bodyH = floor(rows*0.85)-4，行数恒定不抖动；组件自己画满整个矩形
+ *       （每行严格 = width），pi 合成浮层时也会把浮层区域 pad 到声明宽度，
+ *       区域内不会漏出底层；边框外露出的是聊天/右栏，属正常 UI。
  *     数据源：只扫 pi 自己的会话日志目录 ~/.pi/agent/sessions（递归所有 .jsonl；
  *     不依赖 ai-sub-dashboard 在跑）；
  *     只统计 type=message 的 assistant 行，按消息 id 跨文件去重（/tree fork 会复制历史消息）；
@@ -46,16 +48,10 @@
  *     默认热力图周期会跳过「窗口内 0 事件」的窗口，真空时给「无用量」提示而不是一片 ·。
  *     扫描结果按文件 mtime+size 增量缓存到 ~/.pi/agent/.statusbar-subs-cache.json；
  *     热启动 ~10ms，首次全量约 0.5s（133MB/137 文件），每 8 个文件让出一次事件循环不卡 TUI。
- *     高度：不超过 subsMaxLines（默认 16）且不超过终端高度 60%（给聊天/编辑器/页脚留地方）；
- *     内容被截断时末行会明说「…内容被高度上限截断」，不做静默截断；行 0 点击可折叠成一行摘要。
- *     子命令（替代原来的面板内键盘）：
- *       /statusbar subs               打开/关闭 widget（行 0 点击 = 折叠）
- *       /statusbar subs on|off        显式开关
- *       /statusbar subs next|prev     切订阅（原 ↑↓）
- *       /statusbar subs range [next|prev|<周期>]  切热力图周期（原 ←→）
- *       /statusbar subs metric [tokens|cost]      切热力图指标（原 h）
- *       /statusbar subs refresh       强制重扫（原 r）
- *       /statusbar subs collapse|expand           折叠/展开
+ *     数据回填：打开即先渲染「扫描中…」，额度（最多等 SUBS_QUOTA_WAIT_MS）与扫描到位后
+ *       回填重绘；r 键强制重扫（绕过缓存）。
+ *     高度：终端高度的 85% 上下（与 overlayOptions.maxHeight 对应）；内容按
+ *       列表 → 热力图 → 明细 的优先级装不下就降级，不放「静默截断」。
  *     顺带：subs widget 可见时**不把 widget 容器搬进 split 右栏**（右栏默认 32 列，
  *     放不下约 110 列的表格）；关掉后自动恢复入栏。
  *     配置见 subscriptions[]（~/.pi/agent/statusbar.json）：
@@ -226,10 +222,6 @@ interface StatusbarConfig {
 	language: Lang;
 	/** 订阅列表（/statusbar subs 面板的统计口径）；缺省空数组 = 面板只显示「未归属」汇总 */
 	subscriptions: SubscriptionConfig[];
-	/** /statusbar subs widget 最多占几行（默认 16，范围 [4, 60]）。
-	 *  widget 贴编辑器上方，占的是聊天的竖向空间，所以要有上限；
-	 *  实际生效值还会被「终端高度 × 60%」和降级顺序再压一道 */
-	subsMaxLines: number;
 }
 
 /** 配置面板语言 */
@@ -358,7 +350,7 @@ const UI_TEXT = {
 		subsNoConfig:
 			"未配置 subscriptions：在 ~/.pi/agent/statusbar.json 里加 subscriptions[] 后重开面板",
 		subsNoEvents: "该订阅未命中任何 pi 会话用量",
-		subsHint: "/statusbar subs next|range|metric|refresh · 点标题行折叠",
+		subsHint: "↑↓/jk 切订阅 · ←→ 切周期 · h 切指标 · r 重扫 · Esc/q 关闭",
 		subsDetail: "明细",
 		subsHeatmap: "热力图",
 		subsTokens: "Tokens",
@@ -368,23 +360,12 @@ const UI_TEXT = {
 		subsScanning: (files: number, events: number, parsed: number) =>
 			`扫描 ${files} 文件 · ${events} 条事件${parsed ? ` · 本次重解 ${parsed}` : " · 全部命中缓存"}`,
 		subsScanFailed: (e: unknown) => `扫描失败: ${e}`,
-		subsHeatEmpty: "该窗口没有用量（/statusbar subs range next 换周期）",
+		subsHeatEmpty: "该窗口没有用量（←→ 换个周期）",
 		subsDaily: "近 30 天",
 		subsDailyTotal: (total: string, peak: string) =>
 			`共 ${total} · 峰值 ${peak}/天`,
 		subsPeakPerDay: (peak: string) => `峰值 ${peak}/天`,
-		subsWidgetOn: "订阅统计面板已打开（点击标题行折叠/展开）",
-		subsWidgetOff: "订阅统计面板已关闭",
-		subsWidgetNotOpen: "订阅面板未打开：先执行 /statusbar subs",
-		subsWidgetSummary: (subs: number, tok: string, cost: string) =>
-			`订阅用量统计 · ${subs} 个订阅 · 30d ${tok} · ${cost}`,
-		subsTruncated: "…内容被高度上限截断（点标题行折叠，或调大 subsMaxLines）",
-		subsClickHint: "点标题行折叠",
-		subsSelChanged: (name: string) => `订阅: ${name}`,
-		subsRangeChanged: (key: string) => `热力图周期: ${key}`,
-		subsMetricChanged: (m: string) => `热力图指标: ${m}`,
-		subsCollapseChanged: (c: boolean) => (c ? "已折叠为一行" : "已展开"),
-		subsRefreshed: "订阅统计: 已重扫",
+		subsTooNarrow: "终端太窄，拉宽一点再看订阅统计（Esc 关闭）",
 	},
 	en: {
 		menuTitle: "Statusbar Settings",
@@ -426,7 +407,7 @@ const UI_TEXT = {
 		subsNoConfig:
 			"No subscriptions configured: add subscriptions[] to ~/.pi/agent/statusbar.json, then reopen",
 		subsNoEvents: "No pi session usage matched this subscription",
-		subsHint: "/statusbar subs next|range|metric|refresh · click the title to collapse",
+		subsHint: "↑↓/jk subs · ←→ range · h metric · r rescan · Esc/q close",
 		subsDetail: "Detail",
 		subsHeatmap: "Heatmap",
 		subsTokens: "Tokens",
@@ -436,23 +417,12 @@ const UI_TEXT = {
 		subsScanning: (files: number, events: number, parsed: number) =>
 			`${files} files · ${events} events${parsed ? ` · ${parsed} re-parsed` : " · all cached"}`,
 		subsScanFailed: (e: unknown) => `Scan failed: ${e}`,
-		subsHeatEmpty: "No usage in this window (/statusbar subs range next)",
+		subsHeatEmpty: "No usage in this window (←→ for another range)",
 		subsDaily: "Last 30 days",
 		subsDailyTotal: (total: string, peak: string) =>
 			`${total} total · peak ${peak}/day`,
 		subsPeakPerDay: (peak: string) => `peak ${peak}/day`,
-		subsWidgetOn: "Subscription panel shown (click the title row to collapse/expand)",
-		subsWidgetOff: "Subscription panel hidden",
-		subsWidgetNotOpen: "Panel is not open: run /statusbar subs first",
-		subsWidgetSummary: (subs: number, tok: string, cost: string) =>
-			`Subscription usage · ${subs} subs · 30d ${tok} · ${cost}`,
-		subsTruncated: "…truncated by the height cap (click the title to collapse, or raise subsMaxLines)",
-		subsClickHint: "click the title to collapse",
-		subsSelChanged: (name: string) => `Subscription: ${name}`,
-		subsRangeChanged: (key: string) => `Heatmap range: ${key}`,
-		subsMetricChanged: (m: string) => `Heatmap metric: ${m}`,
-		subsCollapseChanged: (c: boolean) => (c ? "Collapsed to one line" : "Expanded"),
-		subsRefreshed: "Subscription stats: rescanned",
+		subsTooNarrow: "Terminal too narrow for the subscription panel (Esc closes)",
 	},
 } as const;
 
@@ -477,9 +447,6 @@ const DEFAULT_LAYOUT: LayoutMode = "auto";
 const DEFAULT_RIGHT_WIDTH = 32;
 const DEFAULT_PANEL_BORDER: PanelBorder = "auto";
 const DEFAULT_PANEL_FILL = true;
-/** subs widget 行数上限的默认值（见 StatusbarConfig.subsMaxLines）：
- *  按「完整热力图 11 行 + 订阅列表 4 行 + 标题/表头/提示」估的，调小则更紧凑 */
-const DEFAULT_SUBS_MAX_LINES = 20;
 /** 面板边框字符表（h 横线 / v 竖线 / 四角）；auto 只是一种设定值，不参与查表 */
 const BORDER_CHARS: Record<
 	"unicode" | "ascii",
@@ -504,12 +471,6 @@ function toRightWidth(v: unknown): number {
 
 function toLang(v: unknown): Lang {
 	return v === "en" ? "en" : "zh";
-}
-
-/** subs widget 行数上限：非法/缺省 → 默认值；否则 clamp 到 [4, 60] */
-function toSubsMaxLines(v: unknown): number {
-	if (typeof v !== "number" || !Number.isFinite(v)) return DEFAULT_SUBS_MAX_LINES;
-	return Math.min(60, Math.max(4, Math.round(v)));
 }
 
 function toStringArray(v: unknown): string[] | undefined {
@@ -649,7 +610,6 @@ function loadConfig(): StatusbarConfig {
 			hiddenMetrics: toMetricKeys(raw?.hiddenMetrics),
 			language: toLang(raw?.language),
 			subscriptions: toSubscriptions(raw?.subscriptions),
-			subsMaxLines: toSubsMaxLines(raw?.subsMaxLines),
 		};
 	} catch {
 		return {
@@ -664,7 +624,6 @@ function loadConfig(): StatusbarConfig {
 			hiddenMetrics: [],
 			language: "zh",
 			subscriptions: [],
-			subsMaxLines: DEFAULT_SUBS_MAX_LINES,
 		};
 	}
 }
@@ -688,7 +647,6 @@ function saveConfigPatch(patch: Record<string, unknown>): void {
 			hiddenMetrics: config.hiddenMetrics,
 			language: config.language,
 			subscriptions: config.subscriptions,
-			subsMaxLines: config.subsMaxLines,
 		};
 	}
 	Object.assign(raw, patch);
@@ -2178,32 +2136,47 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/** 订阅统计全屏面板：↑↓ 选订阅，←→ 选热力图周期，h 切 tokens/费用，r 重扫 */
-	class SubsDashboardComponent {
+	/**
+	 * 订阅统计浮层组件 —— 形态与交互对齐 pi-subagents 的 fleet inspector
+	 * （其 src/tui/fleet.ts 的 SubagentFleetComponent + openSubagentFleet）：
+	 *   - 打开方式 ctx.ui.custom + { overlay: true, overlayOptions: { anchor: "center",
+	 *     width: "95%", minWidth: 60, maxHeight: "85%", margin: 1 } }：居中带边框的浮层，
+	 *     **键盘可交互**（custom 会把焦点交给 overlay 组件；收不到键盘的是 widget，不是 overlay）；
+	 *   - 组件自己画满整个矩形（╭─╮ / │ / ╰─╯，每行严格等于 width）：pi 合成浮层时也会把
+	 *     浮层区域 pad 到声明宽度（tui.js compositeTuiLine 的 overlayPad），区域内不会漏出
+	 *     底层；边框外露出的就是底层**正常 UI**（聊天 / 右栏分栏）—— 早期「漏字」是因为
+	 *     既想铺满整屏又没真铺满；现在不铺满，让底层 UI 自然露出来即可；
+	 *   - 高度自己算：bodyH = floor(rows * 0.85) - 4（与 maxHeight: "85%" 对应；fleet 是
+	 *     -6，它多一条分隔线）。渲染行数恒定 → 浮层是稳定矩形，不随内容抖动。
+	 */
+	class SubsPanelComponent {
 		rows: SubStats[] = [];
 		meta: ScanResult | null = null;
 		error: string | null = null;
 		loading = true;
-		/** 数据版本号：外部回填后自增，用于作废渲染缓存 */
-		rev = 0;
-		/** 折叠态：只渲染一行摘要（widget 行 0 点击切换；pi-subagents 同款交互） */
-		collapsed = false;
 		private sel = 0;
 		private heatIdx = 0;
 		private heatMetric: "tokens" | "costUSD" = "tokens";
-		private cachedW?: number;
-		private cachedRev = -1;
-		/** 行数上限也要进缓存键：内容按它截断，只盯 width 会拿到旧行数布局 */
-		private cachedH = -1;
+		private cachedW = -1;
+		private cachedBodyH = -1;
 		private cachedLines?: string[];
 
 		constructor(
 			private theme: Theme,
-			private heightOf: () => number,
-			private requestRender: () => void,
+			private tui: TUI,
+			private done: () => void,
+			/** r 键触发：让外层强制重扫并回填（openSubsPanel 传入 loadSubsData） */
+			private onReload: () => void,
 		) {}
 
+		/** 数据回填 / 状态变化后调用：作废渲染缓存并请求重绘（外部回填只需调这一个） */
 		invalidate(): void {
 			this.cachedLines = undefined;
+			try {
+				this.tui.requestRender();
+			} catch {
+				// TUI 已销毁（关面板瞬间的回填竞态），忽略
+			}
 		}
 
 		/** 第一个「窗口内有事件」的窗口下标（额度窗口在前、固定四档在后的展示顺序）；全空返回 0 */
@@ -2229,177 +2202,90 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		/**
-		 * widget 组件**收鼠标不收键盘**（实测按 ↓↓/j/Esc 后 handleInput 调用次数始终为 0，
-		 * 因为焦点在编辑器上）。所以交互拆成两半：
-		 *   鼠标只管折叠（行 0 点击，pi-subagents 同款）
-		 *   其余状态改由 /statusbar subs 子命令驱动（见下面的 mutator）
+		 * 键盘交互。custom(overlay) 会把焦点交给本组件（widget 才是收不到键盘的）：
+		 *   ↑↓/k/j 切订阅 · ←→ 切热力图周期 · h 切指标 · r 强制重扫 · Esc/q/ctrl+c 关闭
+		 * 键位风格与 fleet inspector 的 defaultFleetKeybindings 一致（selectUp: ["up","k"]）。
 		 */
-		handleMouse(event: {
-			type: string;
-			button: string;
-			y: number;
-			shift?: boolean;
-			alt?: boolean;
-			ctrl?: boolean;
-		}): { handled?: boolean } | undefined {
-			if (event.type !== "click" || event.button !== "left" || event.y !== 0)
-				return undefined;
-			if (event.shift || event.alt || event.ctrl) return undefined;
-			this.collapsed = !this.collapsed;
-			this.touch();
-			return { handled: true };
-		}
-
-		/** pi 卸载 widget 时调用（与 pi-subagents 一致，用于清外部引用） */
-		dispose(): void {
-			this.invalidate();
+		handleInput(data: string): void {
+			if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || data === "q") {
+				this.done();
+				return;
+			}
+			if (matchesKey(data, "up") || data === "k") return this.moveSel(-1);
+			if (matchesKey(data, "down") || data === "j") return this.moveSel(1);
+			if (matchesKey(data, "left")) return this.cycleHeat(-1);
+			if (matchesKey(data, "right")) return this.cycleHeat(1);
+			if (data === "h") {
+				this.heatMetric = this.heatMetric === "tokens" ? "costUSD" : "tokens";
+				this.touch();
+				return;
+			}
+			if (data === "r") this.onReload();
 		}
 
 		/** 改状态后清缓存 + 请求重绘 */
 		private touch(): void {
 			this.invalidate();
-			this.requestRender();
 		}
 
-		/** ↑↓ 的替代：切订阅（dir=+1/-1），顺带把热力图落到第一个有数据的窗口 */
-		moveSel(dir: 1 | -1): string | null {
+		/** 切订阅，顺带把热力图落到第一个有数据的窗口 */
+		private moveSel(dir: 1 | -1): void {
 			const n = this.rows.length;
-			if (!n) return null;
+			if (!n) return;
 			this.sel = (this.sel + dir + n) % n;
 			this.heatIdx = this.firstWindowIdxWithData(this.rows[this.sel]?.windows ?? []);
 			this.touch();
-			return this.rows[this.sel].sub.name;
 		}
 
-		selectedName(): string | null {
-			return this.rows[this.sel]?.sub.name ?? null;
-		}
-
-		/** ←→ 的替代：切热力图周期，返回新周期 key 供子命令回显 */
-		cycleHeat(dir: 1 | -1): string | null {
+		/** 切热力图周期 */
+		private cycleHeat(dir: 1 | -1): void {
 			const wins = this.rows[this.sel]?.windows ?? [];
-			if (!wins.length) return null;
+			if (!wins.length) return;
 			this.heatIdx = (this.heatIdx + dir + wins.length) % wins.length;
 			this.touch();
-			return wins[this.heatIdx].key;
 		}
 
-		/** 直接指定热力图周期 key（不认的 key 返回 null） */
-		setHeatKey(key: string): string | null {
-			const wins = this.rows[this.sel]?.windows ?? [];
-			const i = wins.findIndex((w) => w.key.toLowerCase() === key.toLowerCase());
-			if (i < 0) return null;
-			this.heatIdx = i;
-			this.touch();
-			return wins[i].key;
-		}
-
-		heatKey(): string | null {
-			return this.rows[this.sel]?.windows[this.heatIdx]?.key ?? null;
-		}
-
-		/** h 的替代 */
-		toggleMetric(): "tokens" | "costUSD" {
-			this.heatMetric = this.heatMetric === "tokens" ? "costUSD" : "tokens";
-			this.touch();
-			return this.heatMetric;
-		}
-
-		/** /statusbar subs metric tokens|cost */
-		setMetric(m: "tokens" | "costUSD"): "tokens" | "costUSD" {
-			this.heatMetric = m;
-			this.touch();
-			return this.heatMetric;
-		}
-
-		metricName(): "tokens" | "costUSD" {
-			return this.heatMetric;
-		}
-
-		/** r 的替代：置 loading 并让外层重扫（重扫结果通过 update 回填） */
-		beginReload(): void {
-			this.loading = true;
-			this.error = null;
-			this.rev++;
-			this.touch();
-		}
-
-		/** 子命令改完折叠态后回写 */
-		setCollapsed(on: boolean): void {
-			this.collapsed = on;
-			this.touch();
-		}
-
-		/** 本 widget 允许占用的行数：配置上限 ∩ 终端高度 60%（给聊天/编辑器/页脚留地方），下限 4 */
-		private capRows(): number {
-			const rows = Math.max(1, this.heightOf());
-			return Math.max(4, Math.min(config.subsMaxLines, Math.floor(rows * 0.6)));
+		/** 浮层正文的行数预算：终端高度 85%（与 overlayOptions.maxHeight 对应）
+		 *  减去边框与标题/提示 4 行；下限 6，保证空态也有个能看的框 */
+		private bodyHeight(): number {
+			const rows = this.tui.terminal?.rows ?? 32;
+			return Math.max(6, Math.floor(rows * 0.85) - 4);
 		}
 
 		render(width: number): string[] {
 			// 渲染期异常绝不允许冒泡：pi 会当未捕获异常直接退出进程
 			try {
-				const cap = this.capRows();
-				if (
-					this.cachedLines &&
-					this.cachedW === width &&
-					this.cachedH === cap &&
-					this.cachedRev === this.rev
-				)
+				const innerW = width - 2;
+				if (innerW < 38)
+					return [truncateToWidth(t().subsTooNarrow, width)];
+				const bodyH = this.bodyHeight();
+				if (this.cachedLines && this.cachedW === width && this.cachedBodyH === bodyH)
 					return this.cachedLines;
-				const body = this.collapsed
-					? [this.renderCollapsed(width)]
-					: this.renderWithCapHint(width, cap);
-				// 每行铺到 width：widget 只覆盖自己那几行，同行右侧没人帮忙重绘
-				const lines = body.map((l) => padToWidth(l, width));
+				const th = this.theme;
+				const T = t();
+				const box = (content: string): string =>
+					th.fg("border", "│") + padToWidth(content, innerW) + th.fg("border", "│");
+				const lines: string[] = [
+					th.fg("border", `╭${"─".repeat(innerW)}╮`),
+					box(`${th.fg("accent", T.subsTitle)}  ${th.fg("dim", this.metaLine())}`),
+				];
+				for (const l of this.renderBody(innerW, bodyH)) lines.push(box(l));
+				lines.push(box(th.fg("dim", T.subsHint)));
+				lines.push(th.fg("border", `╰${"─".repeat(innerW)}╯`));
+				const out = lines.map((l) => truncateToWidth(l, width));
 				this.cachedW = width;
-				this.cachedH = cap;
-				this.cachedRev = this.rev;
-				this.cachedLines = lines;
-				return lines;
+				this.cachedBodyH = bodyH;
+				this.cachedLines = out;
+				return out;
 			} catch (e) {
 				return [truncateToWidth(`订阅面板渲染失败: ${e}`, width)];
 			}
 		}
 
-		/**
-		 * 展开态：给截断提示预留 1 行预算，内容确实被截断时补上那行。
-		 * 为什么必须预留：renderBody 会按优先级自己压到预算内，不预留的话它永远压得下，
-		 * 截断就成了静默的（用户看到热力图被切断却不知道还有内容）。
-		 */
-		private renderWithCapHint(width: number, cap: number): string[] {
-			const budget = Math.max(4, cap - 1);
-			const { lines, trimmed } = this.renderBody(width, budget);
-			if (!trimmed) return lines.slice(0, cap);
-			const notice = truncateToWidth(
-				this.theme.fg("dim", ` ${t().subsTruncated}`),
-				width,
-			);
-			return [...lines.slice(0, cap - 1), notice];
-		}
-
-		/** 折叠态：一行摘要（众订阅的 30d token 合计 + 等价费用） */
-		private renderCollapsed(width: number): string {
-			const th = this.theme;
-			const T = t();
-			const sum30 = (pick: (w: WindowStats) => number) =>
-				this.rows.reduce(
-					(a, r) => a + pick(r.windows.find((w) => w.key === "30d") ?? ({} as WindowStats)),
-					0,
-				);
-			const text = ` ${T.subsWidgetSummary(
-				this.rows.length,
-				fmtTokensShort(sum30((w) => w.tokens ?? 0)),
-				fmtCost(sum30((w) => w.costUSD ?? 0)),
-			)} · ${T.subsClickHint}`;
-			return truncateToWidth(th.fg("accent", text), width);
-		}
-
 		private metaLine(): string {
-			const T = t();
 			const m = this.meta;
 			if (!m) return "";
-			return T.subsScanning(m.files, m.events.length, m.parsedFiles);
+			return t().subsScanning(m.files, m.events.length, m.parsedFiles);
 		}
 
 		private rule(label: string, width: number): string {
@@ -2409,77 +2295,60 @@ export default function (pi: ExtensionAPI) {
 			return truncateToWidth(head + th.fg("dim", "─".repeat(rest)), width);
 		}
 
-		private renderBody(width: number, budget: number): { lines: string[]; trimmed: boolean } {
+		/** 行数不足 budget 时用空行补齐（浮层行数恒定），超了则裁掉 */
+		private padBody(lines: string[], budget: number): string[] {
+			const out = [...lines];
+			while (out.length < budget) out.push("");
+			return out.slice(0, budget);
+		}
+
+		/** 掐掉段落首尾的空行：拼装时段落间距统一由 renderBody 控制，避免出现双空行 */
+		private trimBlank(lines: string[]): string[] {
+			const a = [...lines];
+			while (a.length && a[0] === "") a.shift();
+			while (a.length && a[a.length - 1] === "") a.pop();
+			return a;
+		}
+
+		/**
+		 * 正文（不含边框/标题/提示行），预算 = bodyHeight。
+		 * 预算分配：热力图自然高（11 行）优先，列表拿剩下的（浮层比之前的 widget 高得多，
+		 * 上限放到 16 行，十个八个订阅基本能一屏列完），明细只在真有余量时出现；
+		 * 超预算时：1) 明细整段丢 → 2) 裁热力图尾部 → 3) 只剩列表。
+		 */
+		private renderBody(width: number, budget: number): string[] {
 			const th = this.theme;
 			const T = t();
-			const head: string[] = [
-				truncateToWidth(
-					`${th.fg("accent", T.subsTitle)}  ${th.fg("dim", this.metaLine())}`,
-					width,
-				),
-				"",
-			];
-			const hint = ["", th.fg("dim", truncateToWidth(T.subsHint, width))];
 
-			if (this.error)
-				return { lines: [...head, th.fg("error", this.error), ...hint], trimmed: false };
-			if (this.loading)
-				return { lines: [...head, th.fg("muted", T.subsLoading), ...hint], trimmed: false };
+			if (this.error) return this.padBody([th.fg("error", this.error)], budget);
+			if (this.loading) return this.padBody([th.fg("muted", T.subsLoading)], budget);
 			if (this.rows.length === 0)
-				return { lines: [...head, th.fg("muted", T.subsNoConfig), ...hint], trimmed: false };
+				return this.padBody([th.fg("muted", T.subsNoConfig)], budget);
 
 			if (this.sel >= this.rows.length) this.sel = this.rows.length - 1;
 			const sel = this.rows[this.sel];
 
-			// 预算分配：热力图自然高（""+rule+小时刻度+7 行+图例 = 11）优先，列表拿剩下的，
-			// 列表自身夹在 [2, 8] 行（widget 不可能也不用一次显示十几个订阅 —— 选中行用视窗跟随）
 			const heatNatural = 11;
-			const listRows = Math.max(
-				2,
-				Math.min(8, budget - head.length - heatNatural - 2),
-			);
+			const listRows = Math.max(2, Math.min(16, budget - heatNatural - 3));
+			const gap = [""];
+			const list = this.trimBlank(this.renderList(width, listRows));
+			const heat = this.trimBlank(this.renderHeat(sel, width));
+			const detail = this.trimBlank(this.renderDetail(sel, width));
 
-			const list = this.renderList(width, listRows);
-			const heat = this.renderHeat(sel, width);
-			const detail = this.renderDetail(sel, width);
-
-			// 高度自适应：热力图是 hero（11 行自然高），**先给它留够**，列表拿剩下的；
-			// 否则 10 个订阅的列表（11 行）会把热力图挤成只剩一行标题（实测就是这样）。
-			// 明细只在真有余量时出现：widget 空间宝贵，看明细请用 /statusbar subs 子命令或先折叠。
-			// 超预算时：1) 按行裁明细 → 2) 明细整段丢 → 3) 丢提示 → 4) 裁热力图尾部 → 5) 只剩列表。
-			// trimmed 会回给 render()，由它补一行截断提示 —— 截断必须是可见的
-			// 相邻空行折叠：列表尾与热力图头各自带一个分隔空行，叠起来就是两行空白，
-			// 在限高的 widget 里两行很宝贵（实测 150x46 下白白吃掉 1 行）。
-			// 只在拼装后做一次，不动各 section 自己的渲染
-			const dedupe = (ls: string[]): string[] =>
-				ls.filter((l, i) => l !== "" || ls[i - 1] !== "");
-			const full = dedupe([...head, ...list, ...heat, ...detail, ...hint]);
-			let body = full;
-			if (body.length > budget) {
-				const availDetail =
-					budget - head.length - list.length - heat.length - hint.length;
-				body =
-					availDetail >= 4
-						? [...head, ...list, ...heat, ...detail.slice(0, availDetail), ...hint]
-						: [...head, ...list, ...heat, ...hint];
-			}
-			if (body.length > budget) body = [...head, ...list, ...heat];
+			let body = [...list, ...gap, ...heat];
+			const availDetail = budget - body.length - 1;
+			if (detail.length >= 2 && availDetail >= 4)
+				body = [...body, ...gap, ...detail.slice(0, availDetail - 1)];
+			if (body.length > budget) body = [...list, ...gap, ...heat];
 			if (body.length > budget)
-				body = [
-					...head,
-					...list,
-					...heat.slice(0, Math.max(0, budget - head.length - list.length)),
-				];
-			if (body.length > budget) body = [...head, ...list].slice(0, budget);
-			const lines = dedupe(body);
-			return { lines, trimmed: lines.length < full.length };
+				body = [...list, ...heat.slice(0, Math.max(2, budget - list.length - 1))];
+			if (body.length > budget) body = list.slice(0, budget);
+			return this.padBody(body, budget);
 		}
-
 		/** 订阅列表：名称 | 30d 占比条 | today/24h/7d/30d tokens | 7d/30d 费用 | 额度% */
 		/**
-		 * 订阅列表。maxRows 是**视窗高度**：widget 空间有限，不可能把十几个订阅一次列完，
-		 * 所以以选中行为中心开窗（保证 ❯ 始终可见），并在表头标出当前窗口范围（如 3-6/10）。
-		 * 这样 /statusbar subs next|prev 仍能走遍所有订阅。
+		 * 订阅列表。maxRows 是**视窗高度**：浮层里以选中行为中心开窗（保证 ❯ 始终可见），
+		 * 并在表头标出当前窗口范围（如 3-6/10）。这样 ↑↓ 走遍所有订阅时窗口跟随。
 		 */
 		private renderList(width: number, maxRows: number): string[] {
 			const th = this.theme;
@@ -2732,38 +2601,25 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	// ---- 订阅统计 widget ----
-	// 形态选择：widget（真布局组件贴编辑器上方）而不是 overlay。
-	// 理由（对照组：pi-subagents 的 agent 面板，key `subagent-async`）：
-	//   widget 参与真实布局，聊天/右侧面板都不会被遮，也不存在「overlay 没盖到的行列
-	//   漏出底层 alt-screen 内容」那一类 bug（overlay 时代要用 fill() 铺满整屏硬压）；
-	//   代价是 widget 拿不到键盘（实测 handleInput 永不被调用），交互只能走鼠标 + 子命令。
-	const SUBS_WIDGET_KEY = "statusbar-subs";
-	let subsWidgetOn = false;
+	// ---- 订阅统计浮层 ----
+	// 形态选择：overlay（ctx.ui.custom + overlay: true，pi-subagents fleet inspector 同款），
+	// 不是贴编辑器上方的 widget —— 用户要的是**可交互浮层**：overlay 拿得到键盘
+	// （custom 把焦点交给 overlay 组件；收不到键盘的是 widget，handleInput 永不被调用）。
+	let subsPanelOpen = false;
+	/** 选中态是「首次载入才自动定位到用量最大订阅」的一次性开关；
+	 *  每次打开浮层都重置：浮层是即开即走的临时界面，每次打开都应重新定位 */
 	let subsSelectionInitialized = false;
 
-	/** 选中态是「首次载入才自动定位到用量最大订阅」的一次性开关；
-	 *  关掉/结束会话时重置，下次打开重新定位（否则会沿用上一次会话的选中项） */
-	function subSelectionReset(): void {
-		subsSelectionInitialized = false;
-	}
-	/** 已挂载 widget 的控制柄。按 pi-subagents 的经验：
-	 *  **不能反复 setWidget** —— pi 会用「删 key 再重插」实现替换，那会把 widget
-	 *  移动到其他扩展的 widget 之后；要改成原地更新已挂载的组件。 */
-	let subsWidgetCtl: {
-		component: SubsDashboardComponent;
-		update(mut: (c: SubsDashboardComponent) => void): void;
-	} | null = null;
-
-	/** 拉取/重算数据并原地回填到已挂载组件 */
-	async function loadSubsData(ctx: ExtensionContext, force: boolean): Promise<void> {
-		const ctl = subsWidgetCtl;
-		if (!ctl) return;
-		ctl.update((c) => {
-			c.loading = true;
-			c.error = null;
-			c.rev++;
-		});
+	/** 拉取/重算数据并回填到浮层组件（打开时 force=false 走缓存，r 键 force=true 重扫）。
+	 *  竞态安全：浮层被 Esc 关掉后组件只是没人再渲染的普通对象，改字段无害 */
+	async function loadSubsData(
+		ctx: ExtensionContext,
+		force: boolean,
+		c: SubsPanelComponent,
+	): Promise<void> {
+		c.loading = true;
+		c.error = null;
+		c.invalidate();
 		try {
 			// 额度窗口对齐要用实时额度，且必须等它回来再算：
 			// 边算边长（fire-and-forget）会让首屏只拿到「已暖过」的 provider 的额度窗口。
@@ -2773,113 +2629,62 @@ export default function (pi: ExtensionAPI) {
 				new Promise((r) => setTimeout(r, SUBS_QUOTA_WAIT_MS)),
 			]);
 			const r = await ensureSubsScan(force);
-			if (!subsWidgetCtl) return;
 			const { list, unattr } = buildAllSubStats(r.events, Date.now());
-			ctl.update((c) => {
-				c.rows = unattr ? [...list, unattr] : list;
-				if (!subsSelectionInitialized) {
-					subsSelectionInitialized = true;
-					c.initSelection();
-				}
-				c.meta = r;
-				c.loading = false;
-			});
-		} catch (e) {
-			if (!subsWidgetCtl) return;
-			ctl.update((c) => {
-				c.loading = false;
-				c.error = t().subsScanFailed(e);
-			});
-		}
-	}
-
-	/** 分栏 + 入栏时需要重建右栏才能让「widget 是否入栏」生效（ensureSplit 是幂等的） */
-	function relayoutForSubsWidget(): void {
-		if (layoutMode === "split" && activeTui && splitWrapper) {
-			closeSplit();
-			try {
-				activeTui.requestRender();
-			} catch {
-				// TUI 已销毁，忽略
+			c.rows = unattr ? [...list, unattr] : list;
+			if (!subsSelectionInitialized) {
+				subsSelectionInitialized = true;
+				c.initSelection();
 			}
+			c.meta = r;
+			c.loading = false;
+		} catch (e) {
+			c.loading = false;
+			c.error = t().subsScanFailed(e);
 		}
-	}
-
-	/** 卸载 widget（关开关 / 停用状态栏 / 会话结束都用它） */
-	function hideSubsWidget(ctx: ExtensionContext | null): void {
-		const wasOn = subsWidgetOn;
-		subsWidgetOn = false;
-		subsWidgetCtl = null;
-		try {
-			ctx?.ui.setWidget(SUBS_WIDGET_KEY, undefined);
-		} catch {
-			// UI 已销毁 / 旧 ctx，忽略
-		}
-		if (wasOn) relayoutForSubsWidget();
+		c.invalidate();
 	}
 
 	/**
-	 * /statusbar subs：开关订阅统计 widget。
-	 * 原来是个占满整屏的 overlay，现改为贴编辑器上方的 widget（参考 pi-subagents 的 agent 面板）。
+	 * /statusbar subs：打开订阅统计浮层（fleet inspector 同款形态与键位）。
+	 * 先渲染「扫描中…」，数据到位后回填；Esc/q 关闭后焦点自动回到编辑器。
 	 */
-	async function setSubsWidget(
-		ctx: ExtensionContext,
-		on: boolean,
-		notify = true,
-	): Promise<void> {
+	async function openSubsPanel(ctx: ExtensionContext): Promise<void> {
 		if (ctx.mode !== "tui") {
 			ctx.ui.notify(t().noTui, "warning");
 			return;
 		}
-		const T = t();
-		if (on === subsWidgetOn) {
-			if (notify) ctx.ui.notify(on ? T.subsWidgetOn : T.subsWidgetOff, "info");
-			return;
-		}
-		subsWidgetOn = on;
-		if (!on) {
-			hideSubsWidget(ctx);
-			if (notify) ctx.ui.notify(T.subsWidgetOff, "info");
-			return;
-		}
-		ctx.ui.setWidget(SUBS_WIDGET_KEY, (tui, theme) => {
-			const component = new SubsDashboardComponent(
-				theme,
-				() => tui.terminal.rows,
-				() => {
-					try {
-						tui.requestRender();
-					} catch {
-						// TUI 已销毁，忽略
-					}
+		if (subsPanelOpen) return; // 防重入；浮层开着时编辑器本来就拿不到输入
+		subsPanelOpen = true;
+		subsSelectionInitialized = false;
+		try {
+			await ctx.ui.custom<undefined>(
+				(tui, theme, _keybindings, done) => {
+					const component = new SubsPanelComponent(
+						theme,
+						tui,
+						() => done(undefined),
+						() => void loadSubsData(ctx, true, component),
+					);
+					// 不等：先渲染「扫描中…」，数据到位后回填（loadSubsData 自己兜异常，
+					// 不会漏 rejection；最多等 SUBS_QUOTA_WAIT_MS 的额度响应）
+					void loadSubsData(ctx, false, component);
+					return component;
+				},
+				{
+					overlay: true,
+					// 与 fleet 一致：居中 95% 宽、最多 85% 高，四周各留 1 列/行让底层 UI 呼吸
+					overlayOptions: {
+						anchor: "center",
+						width: "95%",
+						minWidth: 60,
+						maxHeight: "85%",
+						margin: 1,
+					},
 				},
 			);
-			subsWidgetCtl = {
-				component,
-				update(mut) {
-					mut(component);
-					component.invalidate();
-					try {
-						tui.requestRender();
-					} catch {
-						// TUI 已销毁，忽略
-					}
-				},
-			};
-			return component;
-		});
-		relayoutForSubsWidget();
-		if (notify) ctx.ui.notify(T.subsWidgetOn, "info");
-		// 不等：催续命令会白卡最多 SUBS_QUOTA_WAIT_MS（3s）。widget 先渲染「扫描中…」，
-		// 数据到位后由 loadSubsData 原地回填（loadSubsData 内部自己 try/catch，不会漏 rejection）
-		void loadSubsData(ctx, false);
-	}
-
-	/** 取当前 widget 组件；未打开时报错并提示 */
-	function subsComponentOrNotify(ctx: ExtensionContext): SubsDashboardComponent | null {
-		const c = subsWidgetCtl?.component;
-		if (!c) ctx.ui.notify(t().subsWidgetNotOpen, "warning");
-		return c ?? null;
+		} finally {
+			subsPanelOpen = false;
+		}
 	}
 
 	// ---------- 实时单价（models.dev） ----------
@@ -3683,9 +3488,7 @@ export default function (pi: ExtensionAPI) {
 				// 把 pi「编辑器上方」的 widget 容器（subagent 的 agent 面板）搬入右栏：
 				// 状态面板在上、agent 面板在下。fullscreen 下鼠标按布局位置命中，
 				// 点击折叠等交互不受影响；结构对不上时静默放弃（留在底部）
-				// subs widget 要整宽（表格约 110 列），入栏的 rightWidth（默认 32）放不下 →
-				// 它可见时一律不入栏，让 widget 容器留在底部；关掉后再由下一帧搬回右栏
-				const dockAllowed = config.dockWidgetsInSplit && !subsWidgetOn;
+				const dockAllowed = config.dockWidgetsInSplit;
 				if (!dockAllowed && dockedWidget) undockWidgets(core);
 				let rightSide: Component = panel;
 				if (
@@ -3884,8 +3687,6 @@ export default function (pi: ExtensionAPI) {
 	function disable(ctx: ExtensionContext): void {
 		userWants = false;
 		closePanel();
-		subSelectionReset();
-		hideSubsWidget(ctx); // 停用状态栏时把 subs widget 一并收掉
 		closeSplit();
 		if (!ctx.hasUI) return;
 		ctx.ui.setFooter(undefined);
@@ -4623,69 +4424,16 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			// sub / subscriptions 也收：subs 少打一个 s 是常见误输，没必要让人对着报错再试一次。
-			// 子命令集替代原来的**面板内键盘**：widget 拿不到键盘（实测 handleInput 永不被
-			// 调用），所以 next/prev = 原 ↑↓、range = 原 ←→、metric = 原 h、refresh = 原 r
+			// 浮层自带键盘（custom overlay 有焦点），无需任何子命令
 			if (sub === "subs" || sub === "sub" || sub === "subscriptions") {
-				const T = t();
-				const a = parts[1];
-				const b = parts[2];
-				if (!a) {
-					await setSubsWidget(ctx, !subsWidgetOn);
-					return;
-				}
-				if (a === "on" || a === "off") {
-					await setSubsWidget(ctx, a === "on");
-					return;
-				}
-				const c = subsComponentOrNotify(ctx);
-				if (!c) return;
-				if (a === "next" || a === "prev") {
-					const name = c.moveSel(a === "next" ? 1 : -1);
+				if (parts[1]) {
 					ctx.ui.notify(
-						name ? T.subsSelChanged(name) : T.subsNoConfig,
-						name ? "info" : "warning",
+						`未知参数: subs ${parts[1]}。浮层内用键盘：↑↓/jk 切订阅 · ←→ 切周期 · h 切指标 · r 重扫 · Esc 关闭`,
+						"warning",
 					);
 					return;
 				}
-				if (a === "range") {
-					const key =
-						!b || b === "next" || b === "prev"
-							? c.cycleHeat(b === "prev" ? -1 : 1)
-							: c.setHeatKey(b);
-					ctx.ui.notify(
-						key ? T.subsRangeChanged(key) : `未知周期: ${b ?? ""}`,
-						key ? "info" : "warning",
-					);
-					return;
-				}
-				if (a === "metric") {
-					const m =
-						b === "tokens"
-							? c.setMetric("tokens")
-							: b === "cost"
-								? c.setMetric("costUSD")
-								: c.toggleMetric();
-					ctx.ui.notify(
-						T.subsMetricChanged(m === "costUSD" ? T.subsCost : T.subsTokens),
-						"info",
-					);
-					return;
-				}
-				if (a === "refresh") {
-					c.beginReload();
-					await loadSubsData(ctx, true);
-					ctx.ui.notify(T.subsRefreshed, "info");
-					return;
-				}
-				if (a === "collapse" || a === "expand") {
-					c.setCollapsed(a === "collapse");
-					ctx.ui.notify(T.subsCollapseChanged(c.collapsed), "info");
-					return;
-				}
-				ctx.ui.notify(
-					`未知子命令: subs ${a}。用法: /statusbar subs [on|off|next|prev|range [next|prev|<周期>]|metric [tokens|cost]|refresh|collapse|expand]`,
-					"warning",
-				);
+				await openSubsPanel(ctx);
 				return;
 			}
 			if (sub === "quota") {
@@ -4722,8 +4470,8 @@ export default function (pi: ExtensionAPI) {
 					continue; // 回到菜单可继续操作
 				}
 				if (action === "subs") {
-					await setSubsWidget(ctx, !subsWidgetOn);
-					continue; // 回到菜单可继续操作
+					await openSubsPanel(ctx);
+					continue; // 关掉浮层后回到菜单可继续操作
 				}
 				toggleStatusbar(ctx);
 				return;
@@ -4799,9 +4547,6 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", async () => {
 		closeSplit();
 		closePanel();
-		subSelectionReset();
-		// 传 currentCtx：传 null 会被 `ctx?.ui` 短路，widget 实际不会被注销
-		hideSubsWidget(currentCtx);
 		currentCtx = null;
 		activeFooterData = null;
 		activeTui = null;
