@@ -1,6 +1,6 @@
 {
 	"name": "@qinggangli/pi-statusbar",
-	"version": "1.1.0",
+	"version": "1.2.0",
 	"description": "pi 自定义状态栏：git 分支 / token 用量 / 实时花费 / TTFT / tok/s / 上下文占用 / 订阅额度",
 	"keywords": [
 		"pi-package",
