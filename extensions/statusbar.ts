@@ -479,9 +479,16 @@ function toLang(v: unknown): Lang {
 function toStringArray(v: unknown): string[] | undefined {
 	if (!Array.isArray(v)) return undefined;
 	const out = v.filter(
-		(x): x is string => typeof x === "string" && !!x.trim(),
+		(x): x is string => typeof x === "string" && x.trim().length > 0,
 	);
 	return out.length ? out : undefined;
+}
+
+/** billingType 合法值收窄："prepaid" | "subscription"，其余/缺省 → undefined */
+function toBillingType(v: unknown): SubscriptionConfig["billingType"] {
+	if (v === "prepaid") return "prepaid";
+	if (v === "subscription") return "subscription";
+	return undefined;
 }
 
 /**
@@ -505,7 +512,7 @@ function toSubscriptions(v: unknown): SubscriptionConfig[] {
 				const key = typeof wr.key === "string" ? wr.key.trim() : "";
 				const spanMs =
 					typeof wr.spanMs === "number" &&
-					isFinite(wr.spanMs) &&
+					Number.isFinite(wr.spanMs) &&
 					wr.spanMs > 0
 						? wr.spanMs
 						: undefined;
@@ -520,7 +527,7 @@ function toSubscriptions(v: unknown): SubscriptionConfig[] {
 			name,
 			plan: typeof r.plan === "string" ? r.plan : undefined,
 			priceMonthly:
-				typeof r.priceMonthly === "number" && isFinite(r.priceMonthly)
+				typeof r.priceMonthly === "number" && Number.isFinite(r.priceMonthly)
 					? r.priceMonthly
 					: undefined,
 			startDate: typeof r.startDate === "string" ? r.startDate : undefined,
@@ -532,12 +539,7 @@ function toSubscriptions(v: unknown): SubscriptionConfig[] {
 				r.status === "paused"
 					? r.status
 					: undefined,
-			billingType:
-				r.billingType === "prepaid"
-					? "prepaid"
-					: r.billingType === "subscription"
-						? "subscription"
-						: undefined,
+			billingType: toBillingType(r.billingType),
 			providerFilter: toStringArray(r.providerFilter),
 			modelFilter: toStringArray(r.modelFilter),
 			quotaWindows: quotaWindows.length ? quotaWindows : undefined,
@@ -682,6 +684,8 @@ function toModelCost(c: any): ModelCost {
 }
 
 const MODELS_DEV_URL = "https://models.dev/api.json";
+/** OpenCode Go 用量端点（未文档化；与推理侧 /messages 只认 x-api-key 相反，这里只认 Bearer） */
+const OPENCODE_GO_USAGE_URL = "https://opencode.ai/zen/go/v1/usage";
 const PRICE_TTL_MS = 24 * 60 * 60_000;
 const PRICE_CACHE_FILE = join(homedir(), ".pi/agent/.models-dev-prices.json");
 
@@ -857,7 +861,8 @@ function kimiUsageLabel(key: string): string | null {
 	const d = /^limit_(\d+)d$/.exec(key);
 	if (d) {
 		const days = parseInt(d[1], 10);
-		return days % 7 === 0 ? (days === 7 ? "周" : `${days / 7}周`) : `${days}天`;
+		if (days % 7 !== 0) return `${days}天`;
+		return days === 7 ? "周" : `${days / 7}周`;
 	}
 	return null;
 }
@@ -942,10 +947,11 @@ const QUOTA_SOURCES: QuotaSource[] = [
 			for (const [key, w] of Object.entries(json?.usages ?? {})) {
 				const label = kimiUsageLabel(key);
 				if (!label || shownLabels.has(label)) continue;
-				const ratio = parseFloat((w as any)?.used_ratio);
+				const u = w as { used_ratio?: unknown; reset_time?: unknown } | null;
+				const ratio = parseFloat(String(u?.used_ratio));
 				if (!Number.isFinite(ratio)) continue;
 				const pct = ratio * 100;
-				const at = toResetAt((w as any)?.reset_time);
+				const at = toResetAt(u?.reset_time);
 				const text = withReset(`${label} ${Math.round(pct)}%`, at);
 				parts.push(text);
 				rows.push({
@@ -1041,12 +1047,9 @@ const QUOTA_SOURCES: QuotaSource[] = [
 			const json: any = await res.json();
 			const info = json?.balance_infos?.[0];
 			if (!info) return { seg: null, detail: "响应中无余额信息" };
-			const symbol =
-				info.currency === "CNY"
-					? "¥"
-					: info.currency === "USD"
-						? "$"
-						: `${info.currency} `;
+			let symbol = `${info.currency} `;
+			if (info.currency === "CNY") symbol = "¥";
+			else if (info.currency === "USD") symbol = "$";
 			const total = parseFloat(info.total_balance);
 			let detail = `DeepSeek 余额 ${symbol}${info.total_balance}`;
 			if (parseFloat(info.granted_balance) > 0)
@@ -1088,7 +1091,7 @@ const QUOTA_SOURCES: QuotaSource[] = [
 		async fetch(_origin, apiKey) {
 			// 用量端点固定在 /zen/go/v1/usage，且只认 Bearer——与推理侧 /messages
 			// 只认 x-api-key 正好相反，不能互换（参照 cc-switch coding_plan.rs 实测结论）。
-			const res = await fetch("https://opencode.ai/zen/go/v1/usage", {
+			const res = await fetch(OPENCODE_GO_USAGE_URL, {
 				headers: {
 					Authorization: `Bearer ${apiKey}`,
 					Accept: "application/json",
@@ -1405,7 +1408,7 @@ const FIXED_WINDOWS: { key: string; spanMs: number; todayOnly?: boolean }[] = [
 /** 紧凑 token 数：1.2k / 12.3m / 3.32b。
  *  单独写一个而不复用 fmtTokens：后者只到 m，十亿级会显示成 2737.54m */
 function fmtTokensShort(n: number): string {
-	if (!isFinite(n) || n <= 0) return "0";
+	if (!Number.isFinite(n) || n <= 0) return "0";
 	if (n < 1000) return `${Math.round(n)}`;
 	if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
 	if (n < 1_000_000_000) return `${(n / 1_000_000).toFixed(1)}m`;
@@ -1414,14 +1417,14 @@ function fmtTokensShort(n: number): string {
 
 /** 宽紧两档费用：面板列窄时用紧凑档（省掉 $0 的第三位小数） */
 function fmtCostShort(n: number): string {
-	if (!isFinite(n) || n <= 0) return "$0";
+	if (!Number.isFinite(n) || n <= 0) return "$0";
 	if (n >= 100) return `$${Math.round(n)}`;
 	return n >= 1 ? `$${n.toFixed(1)}` : `$${n.toFixed(2)}`;
 }
 
 function toNum(v: unknown): number {
 	const n = typeof v === "number" ? v : parseFloat(String(v));
-	return isFinite(n) && n > 0 ? n : 0;
+	return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
 /** 本地当天 0 点（面板按用户本地时区展示，不使用 UTC） */
@@ -1462,7 +1465,7 @@ function parseSessionFile(path: string): SubEvent[] {
 		return out;
 	}
 	for (const line of text.split("\n")) {
-		if (!line || line.indexOf('"assistant"') === -1) continue;
+		if (!line.includes('"assistant"')) continue;
 		let d: any;
 		try {
 			d = JSON.parse(line);
@@ -1511,12 +1514,19 @@ function loadSubsCache(): SubScanCache {
 	return { version: SUBS_CACHE_VERSION, files: {} };
 }
 
+/** JSON 存储的原子写缝：先写临时文件再 rename，崩溃不会留半个 JSON。
+ *  subs 扫描缓存 / 单价缓存共用；payload 走模板串，统一末尾换行 */
+function writeJsonAtomic(path: string, data: unknown): void {
+	mkdirSync(dirname(path), { recursive: true });
+	const tmp = `${path}.tmp-${process.pid}`;
+	const payload = `${JSON.stringify(data)}\n`;
+	writeFileSync(tmp, payload);
+	renameSync(tmp, path);
+}
+
 function saveSubsCache(cache: SubScanCache): void {
 	try {
-		mkdirSync(dirname(SUBS_CACHE_FILE), { recursive: true });
-		const tmp = `${SUBS_CACHE_FILE}.tmp-${process.pid}`;
-		writeFileSync(tmp, JSON.stringify(cache));
-		renameSync(tmp, SUBS_CACHE_FILE);
+		writeJsonAtomic(SUBS_CACHE_FILE, cache);
 	} catch {
 		// 缓存写失败不影响本次结果（下次重扫而已）
 	}
@@ -1595,7 +1605,8 @@ function matchOne(pattern: string, value: string): boolean {
 }
 
 function matchAny(patterns: string[] | undefined, value: string): boolean {
-	return !!patterns?.length && patterns.some((p) => matchOne(p, value));
+	if (!patterns?.length) return false;
+	return patterns.some((p) => matchOne(p, value));
 }
 
 /**
@@ -1625,7 +1636,8 @@ function attributeEvents(
 				}
 			}
 		}
-		if (hitId) byId.get(hitId)!.push(ev);
+		const bucket = hitId ? byId.get(hitId) : undefined;
+		if (bucket) bucket.push(ev);
 		else unattributed.push(ev);
 	}
 	return { byId, unattributed };
@@ -1727,7 +1739,7 @@ function buildSubStats(
 				Math.max(0, since),
 				until,
 				costOf,
-				!!qw.resetAt,
+				qw.resetAt != null,
 				qw.percent,
 			),
 		);
@@ -2374,8 +2386,9 @@ export default function (pi: ExtensionAPI) {
 			// 数字块与额度列之间必须留间隔，否则右对齐的费用会和额度粘成 "$32.45h 42%"
 			const quotaGap = 2;
 			// 额度列只在真有额度数据时才占位（否则表头会出现一个永远空白的列）
+			const barReserve = showBar ? barW : 0;
 			const quotaW = hasQuota
-				? Math.max(0, width - fixedW - (showBar ? barW : 0) - quotaGap)
+				? Math.max(0, width - fixedW - barReserve - quotaGap)
 				: 0;
 			const showQuota = hasQuota && quotaW > 6;
 
@@ -2453,9 +2466,11 @@ export default function (pi: ExtensionAPI) {
 					}
 				}
 				if (showQuota) {
-					const segs = r.windows
-						.filter((w) => w.percent != null)
-						.map((w) => `${w.key} ${Math.round(w.percent!)}%`);
+					const segs: string[] = [];
+					for (const w of r.windows) {
+						if (w.percent == null) continue;
+						segs.push(`${w.key} ${Math.round(w.percent)}%`);
+					}
 					cells.push({ text: "", w: quotaGap });
 					cells.push({ text: fitSegments(segs, quotaW), w: quotaW });
 				}
@@ -2541,10 +2556,9 @@ export default function (pi: ExtensionAPI) {
 			// 表头下加一条细分隔线，让表与表头分层
 			out.push(th.fg("dim", "─".repeat(Math.min(width, 70))));
 			for (const w of sel.windows) {
-				const used =
-					w.percent == null
-						? "—"
-						: `${Math.round(w.percent)}%${w.aligned ? "⟲" : ""}`;
+				let used = "—";
+				if (w.percent != null)
+					used = `${Math.round(w.percent)}%${w.aligned ? "⟲" : ""}`;
 				// 窗口 key 着色：对齐了真实额度边界的用 accent，纯滚动的用 muted
 				const keyText = w.aligned ? th.fg("accent", w.key) : th.fg("muted", w.key);
 				out.push(
@@ -2761,7 +2775,7 @@ export default function (pi: ExtensionAPI) {
 		const runtime = new Map<string, ModelCost>();
 		for (const m of ctx.modelRegistry.getAvailable()) {
 			if (!m?.provider || !m?.id) continue;
-			const c = (m as any)?.cost;
+			const c = m.cost;
 			if (!isZeroCost(c)) runtime.set(`${m.provider}:${m.id}`, c);
 		}
 		for (const [key, meta] of Object.entries(priceMeta)) {
@@ -2848,7 +2862,7 @@ export default function (pi: ExtensionAPI) {
 					nextMeta[key] = { source: "provider", via: `${m.provider}/${m.id}` };
 					continue;
 				}
-				const runtime = (m as any)?.cost;
+				const runtime = m.cost;
 				if (!isZeroCost(runtime)) {
 					next[key] = runtime;
 					nextMeta[key] = { source: "runtime" };
@@ -2882,10 +2896,11 @@ export default function (pi: ExtensionAPI) {
 			priceStamp = `net:${Date.now()}`;
 			priceSource = "models.dev(实时)";
 			try {
-				writeFileSync(
-					PRICE_CACHE_FILE,
-					JSON.stringify({ fetchedAt: Date.now(), prices: next, meta: nextMeta }),
-				);
+				writeJsonAtomic(PRICE_CACHE_FILE, {
+					fetchedAt: Date.now(),
+					prices: next,
+					meta: nextMeta,
+				});
 			} catch {
 				// 写缓存失败不影响使用
 			}
@@ -2902,7 +2917,7 @@ export default function (pi: ExtensionAPI) {
 	function ratesFor(ctx: ExtensionContext): ModelCost | undefined {
 		const model = ctx.model;
 		if (!model) return undefined;
-		return priceTable[`${model.provider}:${model.id}`] ?? (model as any)?.cost;
+		return priceTable[`${model.provider}:${model.id}`] ?? model.cost;
 	}
 
 	/** 单条消息的用量切片：阶梯定价按单次请求判定，所以计价的最小单位是「一条消息」 */
@@ -3054,8 +3069,9 @@ export default function (pi: ExtensionAPI) {
 					key: "ctx",
 				});
 			} else {
-				const color =
-					cu.percent >= 90 ? "error" : cu.percent >= 75 ? "warning" : "success";
+				let color: "error" | "warning" | "success" = "success";
+				if (cu.percent >= 90) color = "error";
+				else if (cu.percent >= 75) color = "warning";
 				segs.push({
 					label: "Ctx",
 					text: theme.fg(
@@ -3072,7 +3088,9 @@ export default function (pi: ExtensionAPI) {
 		if (ctx.model?.id) {
 			const level = pi.getThinkingLevel();
 			const showEffort =
-				!!level && level !== "off" && !config.hiddenMetrics.includes("effort");
+				Boolean(level) &&
+				level !== "off" &&
+				!config.hiddenMetrics.includes("effort");
 			if (variant === "panel") {
 				// 面板竖排：模型与思考强度分行，避免长模型名被截断
 				segs.push({
@@ -3084,7 +3102,7 @@ export default function (pi: ExtensionAPI) {
 				if (showEffort)
 					segs.push({
 						label: "Effort",
-						text: theme.fg("muted", level!),
+						text: theme.fg("muted", level),
 						pri: 1,
 						key: "effort",
 					});
@@ -3198,7 +3216,9 @@ export default function (pi: ExtensionAPI) {
 			if (state?.seg) {
 				const colorOf = (p: number | undefined) => {
 					if (p == null) return "muted";
-					return p >= 85 ? "error" : p >= 60 ? "warning" : "success";
+					if (p >= 85) return "error";
+					if (p >= 60) return "warning";
+					return "success";
 				};
 				// 面板值列窄：逐窗口分行（每行自带恢复倒计时），底部单行各窗口用 · 连接
 				if (variant === "panel" && state.seg.rows?.length) {
@@ -4000,7 +4020,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		private keys(): MetricKey[] {
-			return METRICS.filter((m) => this.hidden.has(m.key)).map((m) => m.key);
+			return METRICS.flatMap((m) => (this.hidden.has(m.key) ? [m.key] : []));
 		}
 
 		handleInput(data: string): void {
@@ -4042,11 +4062,8 @@ export default function (pi: ExtensionAPI) {
 				const name = metricName(m);
 				const mark = cur ? th.fg("accent", "❯") : " ";
 				const icon = shown ? th.fg("success", "●") : th.fg("dim", "○");
-				const text = shown
-					? cur
-						? th.fg("text", name)
-						: th.fg("muted", name)
-					: th.fg("dim", name);
+				let text = th.fg("dim", name);
+				if (shown) text = cur ? th.fg("text", name) : th.fg("muted", name);
 				lines.push(truncateToWidth(`  ${mark} ${icon} ${text}`, width));
 			});
 			lines.push("");
@@ -4135,7 +4152,7 @@ export default function (pi: ExtensionAPI) {
 
 			// 关闭：只有确实由我们改过（有备份）才还原
 			if (config.tuiModeBackup === undefined) return none;
-			if (config.tuiModeBackup === "none") delete settings.tuiMode;
+			if (config.tuiModeBackup === "none") settings.tuiMode = undefined;
 			else settings.tuiMode = config.tuiModeBackup;
 			config.tuiModeBackup = undefined;
 			saveConfigPatch({ tuiModeBackup: config.tuiModeBackup });
@@ -4185,14 +4202,10 @@ export default function (pi: ExtensionAPI) {
 
 		const sync = syncPiTuiMode(next === "split");
 		if (next !== "split") {
-			notify?.(
-				sync.failed
-					? T.splitSetFailed
-					: sync.wrote
-						? T.splitRestored
-						: T.splitDisabled,
-				sync.failed ? "warning" : "info",
-			);
+			let msg: string = T.splitDisabled;
+			if (sync.failed) msg = T.splitSetFailed;
+			else if (sync.wrote) msg = T.splitRestored;
+			notify?.(msg, sync.failed ? "warning" : "info");
 			return;
 		}
 		if (!HAS_PI_TUI_HSTACK) {
@@ -4370,10 +4383,9 @@ export default function (pi: ExtensionAPI) {
 		try {
 			saveConfigPatch({ hiddenMetrics: keys });
 			const T = t();
+			const sep = config.language === "zh" ? "、" : ", ";
 			ctx.ui.notify(
-				keys.length === 0
-					? T.savedAll
-					: T.savedHidden(keys.join(config.language === "zh" ? "、" : ", ")),
+				keys.length === 0 ? T.savedAll : T.savedHidden(keys.join(sep)),
 				"info",
 			);
 		} catch (e) {
@@ -4535,18 +4547,19 @@ export default function (pi: ExtensionAPI) {
 		// meta 缺失且单价为 0 = 只有 pi 默认补的 0 价 cost，等于无可用单价
 		if (!r || (!meta && isZeroCost(r))) {
 			// 附带 models.dev 同名候选（若有），方便直接抄进 priceMap
-			const cands = model
-				? (lastById.get(model.id.toLowerCase()) ?? [])
-				: [];
-			const hint = cands.length
-				? `；同名候选: ${cands
-						.slice(0, 3)
-						.map(
-							(e) =>
-								`${e.pid}/${e.id} $${e.cost?.input ?? 0}/$${e.cost?.output ?? 0}`,
-						)
-						.join("，")}${cands.length > 3 ? ` 等 ${cands.length} 个` : ""}`
-				: "";
+			const cands = model ? (lastById.get(model.id.toLowerCase()) ?? []) : [];
+			let hint = "";
+			if (cands.length) {
+				const shown = cands
+					.slice(0, 3)
+					.map(
+						(e) =>
+							`${e.pid}/${e.id} $${e.cost?.input ?? 0}/$${e.cost?.output ?? 0}`,
+					)
+					.join("，");
+				const more = cands.length > 3 ? ` 等 ${cands.length} 个` : "";
+				hint = `；同名候选: ${shown}${more}`;
+			}
 			ctx.ui.notify(
 				`${model?.id ?? "?"}: 无可用单价（来源 ${priceSource}）。可在 statusbar.json 的 priceMap 加 "${model?.provider ?? "provider"}:${model?.id ?? "model"}": ["models.dev的provider", "模型id"]${hint}`,
 				"warning",
