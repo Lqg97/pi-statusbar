@@ -41,7 +41,8 @@
  *     费用与 footer 同源：priceTable（models.dev + models.json）逐条 calcCost，
  *     查不到单价时回落 pi 自己算的 usage.cost.total（实测 ~97% 命中单价表）。
  *     归属：subscriptions[].providerFilter 全局优先，其次 modelFilter，同层按配置顺序先到先得；
- *     未命中任何订阅的事件单独归入「未归属」行，不会凭空消失。
+ *     未命中任何订阅的事件单独归入「未归属」行，不会凭空消失；
+ *     列表底部钉一行「总计」（跨订阅含未归属求和，不参与 ↑↓ 选择）。
  *     周期：today/24h/7d/30d 固定四档 + 额度窗口（GLM/Kimi/OpenCode Go/MiniMax 的实时额度接口
  *     会带回窗口长度与重置时刻，面板用 resetAt - spanMs 对齐到 provider 的真实窗口边界，
  *     无接口时可用 subscriptions[].quotaWindows 手工声明）。对齐窗口在明细表里带 ⟲ 标记；
@@ -346,6 +347,7 @@ const UI_TEXT = {
 		rowSubs: "订阅统计",
 		subsTitle: "订阅用量统计",
 		subsUnattributed: "未归属",
+		subsTotal: "总计",
 		subsLoading: "扫描会话日志…",
 		subsNoConfig:
 			"未配置 subscriptions：在 ~/.pi/agent/statusbar.json 里加 subscriptions[] 后重开面板",
@@ -403,6 +405,7 @@ const UI_TEXT = {
 		rowSubs: "Subscriptions",
 		subsTitle: "Subscription usage",
 		subsUnattributed: "Unattributed",
+		subsTotal: "Total",
 		subsLoading: "Scanning session logs…",
 		subsNoConfig:
 			"No subscriptions configured: add subscriptions[] to ~/.pi/agent/statusbar.json, then reopen",
@@ -2329,7 +2332,8 @@ export default function (pi: ExtensionAPI) {
 			const sel = this.rows[this.sel];
 
 			const heatNatural = 11;
-			const listRows = Math.max(2, Math.min(16, budget - heatNatural - 3));
+			// 列表预留 5 行余量：间隙 1 + 分隔线/总计 2 + 尾部空行与明细门限 2
+			const listRows = Math.max(2, Math.min(16, budget - heatNatural - 5));
 			const gap = [""];
 			const list = this.trimBlank(this.renderList(width, listRows));
 			const heat = this.trimBlank(this.renderHeat(sel, width));
@@ -2457,6 +2461,49 @@ export default function (pi: ExtensionAPI) {
 				}
 				out.push(cellsToLine(cells, width));
 			});
+			// 总计行：跨所有订阅（含未归属）求和，钉在列表底部，不参与 ↑↓ 选择。
+			// 额度% 不可加和（各家窗口口径不同），留空；占比条恒满格（总计天然是最大值）
+			out.push(th.fg("dim", "─".repeat(Math.min(width, 70))));
+			const sumTok = (key: string) =>
+				this.rows.reduce((a, r) => a + tokensOf(r, key), 0);
+			const sumCost = (key: string) =>
+				this.rows.reduce(
+					(a, r) =>
+						a + (r.windows.find((w) => w.key === key)?.costUSD ?? 0),
+					0,
+				);
+			const totalCells: Cell[] = [
+				// 与普通行的 ❯/空格 标记位对齐
+				{ text: ` ${th.fg("text", T.subsTotal)}`, w: nameW },
+			];
+			if (showBar) {
+				totalCells.push({
+					text: th.fg("accent", barLine(sumTok("30d"), sumTok("30d"), barW - 1)),
+					w: barW,
+				});
+			}
+			totalCells.push(
+				...FIXED_WINDOWS.map((fw) => ({
+					text: fmtTokensShort(sumTok(fw.key)),
+					w: tW,
+					right: true,
+				})),
+			);
+			if (showCost) {
+				for (const k of ["7d", "30d"]) {
+					const c = sumCost(k);
+					totalCells.push({
+						text: th.fg(costTone(c), fmtCostShort(c)),
+						w: cW,
+						right: true,
+					});
+				}
+			}
+			if (showQuota) {
+				totalCells.push({ text: "", w: quotaGap });
+				totalCells.push({ text: "", w: quotaW });
+			}
+			out.push(cellsToLine(totalCells, width));
 			out.push("");
 			return out;
 		}
