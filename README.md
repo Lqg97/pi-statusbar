@@ -30,6 +30,7 @@ main │ ↑12.3k ↓45.6k ⚡100k·85% $0.123 ⏱980ms 128 tok/s │ ▰▰▰�
   | Kimi（api.kimi.com） | 短窗口 / 周配额已用 % + 恢复倒计时 |
   | OpenCode Go（opencode.ai/zen/go） | 5h / 周 / 月三窗口已用 % + 恢复倒计时 |
   | MiniMax Coding Plan（minimaxi.com / minimax.io） | 5h / 周窗口已用 % + 恢复倒计时 |
+  | Command Code（commandcode.ai） | 5h / 周窗口已用 %（credits 口径）+ 恢复倒计时 + 剩余积分余额 |
   | DeepSeek · OpenRouter · Moonshot 开放平台 · SiliconFlow · StepFun · Novita AI | 按量账户余额（按量计费，无重置概念） |
 
   每个窗口用量后括注恢复倒计时（`45s` / `13m` / `2h13m` / `6d4h`：不足 24h 按 `xhyym`，超 24h 按 `xdyyh`，渲染时按重置时刻实时换算，时刻缺失则不显示）；底部单行各窗口用 `·` 连接，右侧面板逐窗口分行。`/statusbar quota` 强制刷新并显示详情（含各窗口「重置于 2026-09-15 15:45（3h56m）」）
@@ -37,7 +38,7 @@ main │ ↑12.3k ↓45.6k ⚡100k·85% $0.123 ⏱980ms 128 tok/s │ ▰▰▰�
 
   - **数据源**：只扫 pi 自己的会话日志目录 `~/.pi/agent/sessions`（递归所有 `.jsonl`），**不依赖 ai-sub-dashboard 在跑**。只统计 `type=message` 的 assistant 行，按消息 id 跨文件去重（pi 的 `/tree` fork 会把历史消息整段复制进新 session，实测不先去重会多算约 10%）。同目录下 `subagent-artifacts/` 的 `recordType` 结构天然被排除，不会重复计数
   - **费用口径**：与 footer 实时花费**同源**（`priceTable` + 阶梯定价 + 1h 缓存写规则），因此面板数与 footer 数一致；查不到单价时回落 pi 自己算的 `usage.cost.total`（实测约 97% 的消息能命中单价表）
-  - **周期**：固定四档 `today` / `24h` / `7d` / `30d`，外加**额度窗口**——GLM / Kimi / OpenCode Go / MiniMax 的实时额度接口会带回窗口长度与重置时刻，面板用 `resetAt - spanMs` 反推窗口起点，因此「5h 窗口已用 token」与官方百分比是同一个窗口（明细表里带 `⟲` 标记）；没有额度接口的订阅可用 `subscriptions[].quotaWindows` 手工声明
+  - **周期**：固定四档 `today` / `24h` / `7d` / `30d`，外加**额度窗口**——GLM / Kimi / OpenCode Go / MiniMax / Command Code 的实时额度接口会带回窗口长度与重置时刻，面板用 `resetAt - spanMs` 反推窗口起点，因此「5h 窗口已用 token」与官方百分比是同一个窗口（明细表里带 `⟲` 标记）；没有额度接口的订阅可用 `subscriptions[].quotaWindows` 手工声明
   - **形态：pi-subagents fleet inspector 同款的交互浮层**（`ctx.ui.custom` + `overlay: true`，居中 95% 宽、最多 85% 高、带边框）。**键盘可交互**（custom 会把焦点交给浮层组件）：`↑↓`/`jk` 切订阅 · `←→` 切热力图周期 · `h` 切 tokens/费用 · `r` 强制重扫 · `Esc`/`q` 关闭。边框外露出的是底层正常 UI（聊天 / 右侧分栏），关闭后焦点自动回编辑器
   - **为什么不做成贴编辑器的 widget**：widget 参与布局不遮聊天，但实测它**收不到键盘**（按 `↓`/`j`/`Esc` 后组件 `handleInput` 调用次数始终为 0，焦点在编辑器）；订阅统计这种「打开 → 翻看 → 关掉」的临时界面，可交互性优先于不遮挡，所以选浮层
   - **高度与降级**：正文 = 终端高度 85% - 4，行数恒定不抖动；**热力图优先占位**（面板的 hero），订阅列表上限 16 行（十来个订阅一屏列完），明细只在真有余量时出现；订阅列表是**视窗**——选中行始终可见，`↑↓` 走遍所有订阅

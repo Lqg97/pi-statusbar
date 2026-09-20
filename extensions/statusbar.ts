@@ -18,6 +18,7 @@
  *     OpenRouter 额度（openrouter.ai）           → 剩余 credits（无重置概念）
  *     OpenCode Go（opencode.ai/zen/go）          → 5h/周/月三窗口已用百分比 + 恢复倒计时
  *     MiniMax Coding Plan（minimaxi.com / minimax.io）→ 5h/周窗口已用百分比 + 恢复倒计时
+ *     Command Code（commandcode.ai）               → 5h/周窗口已用百分比（credits 口径）+ 剩余积分余额
  *     Moonshot 开放平台（api.moonshot.cn/.ai）   → 按量账户余额（无重置概念）
  *     SiliconFlow（siliconflow.cn/.com）         → 按量账户余额（无重置概念）
  *     StepFun（stepfun.com/.ai）                 → 按量账户余额（无重置概念）
@@ -43,7 +44,7 @@
  *     归属：subscriptions[].providerFilter 全局优先，其次 modelFilter，同层按配置顺序先到先得；
  *     未命中任何订阅的事件单独归入「未归属」行，不会凭空消失；
  *     列表底部钉一行「总计」（跨订阅含未归属求和，不参与 ↑↓ 选择）。
- *     周期：today/24h/7d/30d 固定四档 + 额度窗口（GLM/Kimi/OpenCode Go/MiniMax 的实时额度接口
+ *     周期：today/24h/7d/30d 固定四档 + 额度窗口（GLM/Kimi/OpenCode Go/MiniMax/Command Code 的实时额度接口
  *     会带回窗口长度与重置时刻，面板用 resetAt - spanMs 对齐到 provider 的真实窗口边界，
  *     无接口时可用 subscriptions[].quotaWindows 手工声明）。对齐窗口在明细表里带 ⟲ 标记；
  *     默认热力图周期会跳过「窗口内 0 事件」的窗口，真空时给「无用量」提示而不是一片 ·。
@@ -239,7 +240,7 @@ type Lang = "zh" | "en";
 type PanelBorder = "auto" | "unicode" | "ascii";
 
 /** 订阅额度窗口（显式配置）：key 为展示标签（如 "5h"/"周"/"月"），spanMs 为窗口长度。
- *  一般不需要配：GLM/Kimi/OpenCode Go/MiniMax 的实时额度接口会带回窗口长度与重置时刻，
+ *  一般不需要配：GLM/Kimi/OpenCode Go/MiniMax/Command Code 的实时额度接口会带回窗口长度与重置时刻，
  *  面板会直接用它们对齐；本字段用于接口不可得、或想要额外自定义窗口的订阅。 */
 interface QuotaWindowConfig {
 	key: string;
@@ -1304,6 +1305,121 @@ const QUOTA_SOURCES: QuotaSource[] = [
 			return {
 				seg: { text: `NV $${avail.toFixed(1)}` },
 				detail: `Novita 余额 $${avail.toFixed(2)}`,
+			};
+		},
+	},
+	{
+		id: "CommandCode",
+		// Command Code（commandcode.ai）订阅：alpha 计费接口（与官方 pi-commandcode-provider
+		// 的 src/quota.ts 同组端点）：whoami 拿 orgId → credits（5h/周窗口 + 积分余额）
+		// + subscriptions（套餐/账期）+ usage/summary（本账期用量）。窗口用量单位是
+		// credits（≈美元），resetAt 为秒级时间戳（毫秒值也能兼容识别）。
+		match: /commandcode\.ai/,
+		ttlMs: 5 * 60_000,
+		async fetch(origin, apiKey) {
+			const headers = {
+				Accept: "application/json",
+				Authorization: `Bearer ${apiKey}`,
+			};
+			const getJson = async (path: string): Promise<any> => {
+				const res = await fetch(`${origin}${path}`, {
+					headers,
+					signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+				});
+				if (!res.ok) throw new Error(`HTTP ${res.status}`);
+				return res.json();
+			};
+			/** resetAt 兼容秒/毫秒/ISO，统一成毫秒 */
+			const toResetMs = (v: unknown): number | undefined => {
+				let ts: number | undefined;
+				if (typeof v === "number" && Number.isFinite(v) && v > 0) ts = v;
+				else if (typeof v === "string" && v.trim()) {
+					const s = v.trim();
+					ts = /^\d+$/.test(s) ? Number(s) : Date.parse(s);
+				}
+				if (ts === undefined || !Number.isFinite(ts) || ts <= 0)
+					return undefined;
+				return ts >= 1e12 ? ts : ts * 1000;
+			};
+
+			const who = await getJson("/alpha/whoami");
+			const orgId =
+				typeof who?.org?.id === "string" ? who.org.id : undefined;
+			const q = orgId ? `?orgId=${encodeURIComponent(orgId)}` : "";
+			// credits/subscriptions/summary 任一失败不拖垮整体（无套餐的账号 subscriptions 可能 404）
+			const [creditsRaw, subRaw, summaryRaw] = await Promise.all([
+				getJson(`/alpha/billing/credits${q}`).catch(() => null),
+				getJson(`/alpha/billing/subscriptions${q}`).catch(() => null),
+				getJson(`/alpha/usage/summary${q}`).catch(() => null),
+			]);
+
+			const parts: string[] = [];
+			const rows: QuotaRow[] = [];
+			let maxPercent: number | undefined;
+			const detailAdds: string[] = [];
+			// 5h/周窗口：used/cap 为 credits，占比 = used/cap
+			const WINDOWS: [string, string, number][] = [
+				["fiveHour", "5h", 5 * 3600_000],
+				["weekly", "周", 7 * 24 * 3600_000],
+			];
+			for (const [key, label, spanMs] of WINDOWS) {
+				const w = creditsRaw?.windowLimits?.[key];
+				const used = typeof w?.used === "number" ? w.used : undefined;
+				const cap = typeof w?.cap === "number" ? w.cap : undefined;
+				if (used === undefined || cap === undefined || (used === 0 && cap === 0))
+					continue;
+				const pct = cap > 0 ? (used / cap) * 100 : 0;
+				const at = toResetMs(w?.resetAt);
+				const text = withReset(`${label} ${Math.round(pct)}%`, at);
+				parts.push(text);
+				rows.push({ text, percent: pct, label, spanMs, resetAt: at });
+				maxPercent = Math.max(maxPercent ?? 0, pct);
+				detailAdds.push(
+					`  ${label} 窗口: ${used.toFixed(2)}/${cap.toFixed(2)} credits（${Math.round(pct)}%）${resetDetail(at)}`,
+				);
+			}
+			// 积分余额：monthly + purchased + free
+			const c = creditsRaw?.credits;
+			const monthly = typeof c?.monthlyCredits === "number" ? c.monthlyCredits : 0;
+			const purchased =
+				typeof c?.purchasedCredits === "number" ? c.purchasedCredits : 0;
+			const free = typeof c?.freeCredits === "number" ? c.freeCredits : 0;
+			const remaining = monthly + purchased + free;
+			if (c) parts.push(`$${remaining.toFixed(1)}`);
+
+			const sub = subRaw?.data;
+			const plan = typeof sub?.planId === "string" ? sub.planId : "";
+			const status = typeof sub?.status === "string" ? sub.status : "";
+			let login = "";
+			if (typeof who?.org?.login === "string") login = who.org.login;
+			else if (typeof who?.user?.userName === "string")
+				login = who.user.userName;
+
+			if (parts.length === 0)
+				return { seg: null, detail: "响应中无窗口/积分数据" };
+
+			let planTag = "";
+			if (plan) planTag = `（${plan}${status ? ` ${status}` : ""}）`;
+			let detail = `CommandCode${planTag}${login ? ` · ${login}` : ""}`;
+			for (const line of detailAdds) detail += `\n${line}`;
+			if (c)
+				detail += `\n  积分余额: $${remaining.toFixed(2)}（月 $${monthly.toFixed(2)} + 购买 $${purchased.toFixed(2)}${free > 0 ? ` + 免费 $${free.toFixed(2)}` : ""}）`;
+			if (typeof sub?.currentPeriodEnd === "string")
+				detail += `\n  账期截止: ${sub.currentPeriodEnd}`;
+			const totalCost =
+				typeof summaryRaw?.totalCost === "number"
+					? summaryRaw.totalCost
+					: undefined;
+			if (totalCost !== undefined) {
+				const cnt =
+					typeof summaryRaw?.totalCount === "number"
+						? ` · ${summaryRaw.totalCount} 次`
+					: "";
+				detail += `\n  本周期已用: $${totalCost.toFixed(2)}${cnt}`;
+			}
+			return {
+				seg: { text: `CC ${parts.join("·")}`, rows, maxPercent },
+				detail,
 			};
 		},
 	},
