@@ -1378,14 +1378,15 @@ const QUOTA_SOURCES: QuotaSource[] = [
 					`  ${label} 窗口: ${used.toFixed(2)}/${cap.toFixed(2)} credits（${Math.round(pct)}%）${resetDetail(at)}`,
 				);
 			}
-			// 积分余额：monthly + purchased + free
+			// 积分余额：monthly + purchased + free（均为**剩余**值，随用量递减；剩余+本周期已用≈月付总额）
 			const c = creditsRaw?.credits;
 			const monthly = typeof c?.monthlyCredits === "number" ? c.monthlyCredits : 0;
 			const purchased =
 				typeof c?.purchasedCredits === "number" ? c.purchasedCredits : 0;
 			const free = typeof c?.freeCredits === "number" ? c.freeCredits : 0;
 			const remaining = monthly + purchased + free;
-			if (c) parts.push(`$${remaining.toFixed(1)}`);
+			// 「余$」前缀：紧跟在窗口百分比后面，不加前缀会被读成「已花」
+			if (c) parts.push(`余$${remaining.toFixed(1)}`);
 
 			const sub = subRaw?.data;
 			const plan = typeof sub?.planId === "string" ? sub.planId : "";
@@ -1402,8 +1403,14 @@ const QUOTA_SOURCES: QuotaSource[] = [
 			if (plan) planTag = `（${plan}${status ? ` ${status}` : ""}）`;
 			let detail = `CommandCode${planTag}${login ? ` · ${login}` : ""}`;
 			for (const line of detailAdds) detail += `\n${line}`;
-			if (c)
-				detail += `\n  积分余额: $${remaining.toFixed(2)}（月 $${monthly.toFixed(2)} + 购买 $${purchased.toFixed(2)}${free > 0 ? ` + 免费 $${free.toFixed(2)}` : ""}）`;
+			if (c) {
+				const sources = [
+					`月付 $${monthly.toFixed(2)}`,
+					`购买 $${purchased.toFixed(2)}`,
+				];
+				if (free > 0) sources.push(`免费 $${free.toFixed(2)}`);
+				detail += `\n  剩余积分: $${remaining.toFixed(2)}（${sources.join(" + ")}）`;
+			}
 			if (typeof sub?.currentPeriodEnd === "string")
 				detail += `\n  账期截止: ${sub.currentPeriodEnd}`;
 			const totalCost =
@@ -1414,8 +1421,10 @@ const QUOTA_SOURCES: QuotaSource[] = [
 				const cnt =
 					typeof summaryRaw?.totalCount === "number"
 						? ` · ${summaryRaw.totalCount} 次`
-					: "";
-				detail += `\n  本周期已用: $${totalCost.toFixed(2)}${cnt}`;
+						: "";
+				// 月度总额 = 剩余 + 本周期已用（与官方 /usage 面板同口径）
+				const totalPool = c ? `；月度总额 $${(remaining + totalCost).toFixed(2)}` : "";
+				detail += `\n  本周期已用: $${totalCost.toFixed(2)}${cnt}${totalPool}`;
 			}
 			return {
 				seg: { text: `CC ${parts.join("·")}`, rows, maxPercent },
