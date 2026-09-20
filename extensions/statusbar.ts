@@ -1387,6 +1387,10 @@ const QUOTA_SOURCES: QuotaSource[] = [
 			const remaining = monthly + purchased + free;
 			// 「余$」前缀：紧跟在窗口百分比后面，不加前缀会被读成「已花」
 			if (c) parts.push(`余$${remaining.toFixed(1)}`);
+			// 右侧浮层（panel 变体）只渲染 rows 逐行输出，seg.text 整段被丢弃：
+			// 余额必须自己占一行，否则面板只会显示窗口、看不到余额。
+			// 无 spanMs 的行会被订阅统计的窗口对齐（liveQuotaWindows）自动跳过
+			if (c) rows.push({ text: `余$${remaining.toFixed(1)}` });
 
 			const sub = subRaw?.data;
 			const plan = typeof sub?.planId === "string" ? sub.planId : "";
