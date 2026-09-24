@@ -67,7 +67,24 @@ jobs:
           echo "版本一致：$PKG"
 
       - name: 扩展语法自检
-        run: node --experimental-strip-types --check extensions/statusbar.ts
+        # 为什么不用 `node --experimental-strip-types --check`：Node 24.21 起 --check 走
+        # checkSyntax 路径、不再对 .ts 做类型剥离，会以 `SyntaxError: Unexpected token '{'`
+        # 误报文件开头的 `import type {`（v1.2.0 的 run 是过的，纯是 node-version: "24"
+        # 浮动到 24.21.0 才暴露）。stripTypeScriptTypes 显式解析 TS，与 Node 版本无关；
+        # 本扩展用了参数属性（constructor 里的 private xxx），所以必须 mode: transform 而非 strip。
+        run: |
+          node --disable-warning=ExperimentalWarning -e '
+          const { stripTypeScriptTypes } = require("node:module");
+          const fs = require("node:fs");
+          const file = "extensions/statusbar.ts";
+          if (typeof stripTypeScriptTypes !== "function") {
+            console.error("stripTypeScriptTypes 不可用（需 Node >= 22.13）");
+            process.exit(1);
+          }
+          const src = fs.readFileSync(file, "utf8");
+          stripTypeScriptTypes(src, { mode: "transform" });
+          console.log("扩展语法 OK:", file);
+          '
 
       - name: 校验发布产物只含预期文件
         run: |
