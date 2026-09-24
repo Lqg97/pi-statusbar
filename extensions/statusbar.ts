@@ -42,7 +42,8 @@
  *     费用与 footer 同源：priceTable（models.dev + models.json）逐条 calcCost，
  *     查不到单价时回落 pi 自己算的 usage.cost.total（实测 ~97% 命中单价表）。
  *     归属：subscriptions[].providerFilter 全局优先，其次 modelFilter，同层按配置顺序先到先得；
- *     未命中任何订阅的事件单独归入「未归属」行，不会凭空消失；
+ *     未被任何条目命中、但带 provider 的事件按 provider 自动成行（行名就是 provider id，
+ *     autoDiscoverSubs: false 可关）；provider 为空的事件单独归入「未归属」行，不会凭空消失；
  *     列表底部钉一行「总计」（跨订阅含未归属求和，不参与 ↑↓ 选择）。
  *     周期：today/24h/7d/30d 固定四档 + 额度窗口（GLM/Kimi/OpenCode Go/MiniMax/Command Code 的实时额度接口
  *     会带回窗口长度与重置时刻，面板用 resetAt - spanMs 对齐到 provider 的真实窗口边界，
@@ -56,12 +57,15 @@
  *       列表 → 热力图 → 明细 的优先级装不下就降级，不放「静默截断」。
  *     顺带：subs widget 可见时**不把 widget 容器搬进 split 右栏**（右栏默认 32 列，
  *     放不下约 110 列的表格）；关掉后自动恢复入栏。
- *     配置见 subscriptions[]（~/.pi/agent/statusbar.json）：
+ *     配置见 subscriptions[]（~/.pi/agent/statusbar.json）；**零配置可用**：
+ *       没配的 provider 会自动成行，subscriptions[] 只用来补名字/套餐/账期/额度窗口，
+ *       或把多个 provider 归并成一条订阅（额度接口也能直接认出来，见 quotaWindowsFor）。
  *       subscriptions: [{ id, name, plan?, priceMonthly?, startDate?, expireAt?, autoRenew?,
  *                         status?, billingType?, providerFilter?[], modelFilter?[],
  *                         quotaWindows?: [{ key, spanMs }] }]
  *     providerFilter 按 provider id 精确/子串匹配，modelFilter 按模型名子串匹配（`/re/` 形式按正则）；
  *     两者都缺省的条目永不自动归属（避免一个空过滤器吃掉全部用量）。
+ *     autoDiscoverSubs（默认 true）：false = 关掉自动成行，未命中的用量一律进「未归属」。
  * - /exit 为 /quit 的别名，优雅退出 pi
  * - 窄终端先按 扩展状态 → 额度/token → 模型 的顺序收起，仍放不下则整段换行成多行（分支与上下文永不丢弃）
  * - 布局可配置（layout）：bottom 底部单行 / right 右侧浮层（浮在聊天上）/ auto 自动右侧浮层（默认）
@@ -241,6 +245,9 @@ interface StatusbarConfig {
 	language: Lang;
 	/** 订阅列表（/statusbar subs 面板的统计口径）；缺省空数组 = 面板只显示「未归属」汇总 */
 	subscriptions: SubscriptionConfig[];
+	/** 未被 subscriptions[] 命中的 provider 是否自动成行（默认 true）。
+	 *  行名就是 provider id；false = 未命中的用量一律进「未归属」 */
+	autoDiscoverSubs: boolean;
 }
 
 /** 配置面板语言 */
@@ -381,7 +388,7 @@ const UI_TEXT = {
 		subsTotal: "总计",
 		subsLoading: "扫描会话日志…",
 		subsNoConfig:
-			"未配置 subscriptions：在 ~/.pi/agent/statusbar.json 里加 subscriptions[] 后重开面板",
+			"没有可统计的订阅：扫 pi 会话日志未发现用量（也可在 statusbar.json 的 subscriptions[] 手工声明订阅，以带上套餐/账期/额度窗口）",
 		subsNoEvents: "该订阅未命中任何 pi 会话用量",
 		subsHint: "↑↓/jk 切订阅 · ←→ 切周期 · h 切指标 · r 重扫 · Esc/q 关闭",
 		subsDetail: "明细",
@@ -439,7 +446,7 @@ const UI_TEXT = {
 		subsTotal: "Total",
 		subsLoading: "Scanning session logs…",
 		subsNoConfig:
-			"No subscriptions configured: add subscriptions[] to ~/.pi/agent/statusbar.json, then reopen",
+			"Nothing to show: no usage found in pi session logs (or declare subscriptions[] in statusbar.json to add plan/billing/quota-window info)",
 		subsNoEvents: "No pi session usage matched this subscription",
 		subsHint: "↑↓/jk subs · ←→ range · h metric · r rescan · Esc/q close",
 		subsDetail: "Detail",
@@ -665,6 +672,7 @@ function loadConfig(): StatusbarConfig {
 			hiddenMetrics: toMetricKeys(raw?.hiddenMetrics),
 			language: toLang(raw?.language),
 			subscriptions: toSubscriptions(raw?.subscriptions),
+			autoDiscoverSubs: raw?.autoDiscoverSubs !== false,
 		};
 	} catch {
 		return {
@@ -680,6 +688,7 @@ function loadConfig(): StatusbarConfig {
 			hiddenMetrics: [],
 			language: "zh",
 			subscriptions: [],
+			autoDiscoverSubs: true,
 		};
 	}
 }
@@ -704,6 +713,7 @@ function saveConfigPatch(patch: Record<string, unknown>): void {
 			hiddenMetrics: config.hiddenMetrics,
 			language: config.language,
 			subscriptions: config.subscriptions,
+			autoDiscoverSubs: config.autoDiscoverSubs,
 		};
 	}
 	Object.assign(raw, patch);
@@ -1792,14 +1802,24 @@ function matchAny(patterns: string[] | undefined, value: string): boolean {
 /**
  * 把事件归属到订阅：providerFilter 全局优先于 modelFilter，同层按配置顺序先到先得。
  * 每条事件最多归属一个订阅（与 ai-sub-dashboard 的 attribution 层同语义）。
+ *
+ * autoDiscover=true 时，未被任何配置条目命中、但带 provider 的事件按 provider 分组返回
+ * （discovered），供面板自动成行——这样新 provider 无需改配置就能看见；
+ * false 时这些事件落进 unattributed（旧行为）。provider 为空的事件无法命名，恒进 unattributed。
  */
 function attributeEvents(
 	events: SubEvent[],
 	subs: SubscriptionConfig[],
-): { byId: Map<string, SubEvent[]>; unattributed: SubEvent[] } {
+	autoDiscover: boolean,
+): {
+	byId: Map<string, SubEvent[]>;
+	unattributed: SubEvent[];
+	discovered: Map<string, SubEvent[]>;
+} {
 	const byId = new Map<string, SubEvent[]>();
 	for (const s of subs) byId.set(s.id, []);
 	const unattributed: SubEvent[] = [];
+	const discovered = new Map<string, SubEvent[]>();
 	for (const ev of events) {
 		let hitId: string | null = null;
 		for (const s of subs) {
@@ -1817,10 +1837,19 @@ function attributeEvents(
 			}
 		}
 		const bucket = hitId ? byId.get(hitId) : undefined;
-		if (bucket) bucket.push(ev);
-		else unattributed.push(ev);
+		if (bucket) {
+			bucket.push(ev);
+			continue;
+		}
+		if (autoDiscover && ev.p) {
+			const auto = discovered.get(ev.p);
+			if (auto) auto.push(ev);
+			else discovered.set(ev.p, [ev]);
+		} else {
+			unattributed.push(ev);
+		}
 	}
-	return { byId, unattributed };
+	return { byId, unattributed, discovered };
 }
 
 // ---------- 窗口聚合 ----------
@@ -2262,7 +2291,11 @@ export default function (pi: ExtensionAPI) {
 
 	function buildAllSubStats(events: SubEvent[], now: number) {
 		const subs = config.subscriptions;
-		const { byId, unattributed } = attributeEvents(events, subs);
+		const { byId, unattributed, discovered } = attributeEvents(
+			events,
+			subs,
+			config.autoDiscoverSubs,
+		);
 		const list = subs.map((s) =>
 			buildSubStats(
 				s,
@@ -2272,6 +2305,28 @@ export default function (pi: ExtensionAPI) {
 				now,
 			),
 		);
+		// 自动发现行：扫到但没被任何 subscriptions 条目命中的 provider，按 30d 口径的 token 量
+		// 从大到小排（同量按 id 排序，保证重扫后行序稳定）。名字就是 provider id ——
+		// 不去猜美化规则，可预测；额度窗口由 quotaWindowsFor 里「本行用量最大的 provider」
+		// 自动认出来（本行事件只有一个 provider，推断必然命中），所以无需 providerFilter。
+		const auto = [...discovered.entries()]
+			.map(([pid, evs]) => ({
+				pid,
+				evs,
+				tokens: evs.reduce((n, e) => n + e.i + e.o, 0),
+			}))
+			.sort((a, b) => b.tokens - a.tokens || a.pid.localeCompare(b.pid));
+		for (const a of auto) {
+			list.push(
+				buildSubStats(
+					{ id: `__auto__:${a.pid}`, name: a.pid },
+					a.evs,
+					quotaWindowsFor,
+					subEventCost,
+					now,
+				),
+			);
+		}
 		// 未归属单独成行，避免「配置漏了一条」时用量凭空消失
 		const unattr = unattributed.length
 			? buildSubStats(

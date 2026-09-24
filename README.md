@@ -38,6 +38,7 @@ main │ ↑12.3k ↓45.6k ⚡100k·85% $0.123 ⏱980ms 128 tok/s │ ▰▰▰�
 - **订阅用量统计（`/statusbar subs`）**：**可交互浮层**，按订阅列出各周期消耗的 **token 数与 API 等价费用**，并带 **7×24 热力图**。
 
   - **数据源**：只扫 pi 自己的会话日志目录 `~/.pi/agent/sessions`（递归所有 `.jsonl`），**不依赖 ai-sub-dashboard 在跑**。只统计 `type=message` 的 assistant 行，按消息 id 跨文件去重（pi 的 `/tree` fork 会把历史消息整段复制进新 session，实测不先去重会多算约 10%）。同目录下 `subagent-artifacts/` 的 `recordType` 结构天然被排除，不会重复计数
+  - **零配置可用（订阅列表自动发现）**：面板的行 = `subscriptions[]` 里配的（优先，用你的名字/套餐/账期）+ **扫到但没被任何条目命中的 provider 自动成行**（行名就是 provider id，如 `commandcode`，按 token 量从大到小排）+ 最后一行「未归属」。所以换个新 provider 不用改配置，用量直接看得见；想让自动行改名/带上套餐或额度窗口，再补一条 `subscriptions[]` 即可。`"autoDiscoverSubs": false` 可关掉自动成行（未命中的一律进「未归属」）
   - **费用口径**：与 footer 实时花费**同源**（`priceTable` + 阶梯定价 + 1h 缓存写规则），因此面板数与 footer 数一致；查不到单价时回落 pi 自己算的 `usage.cost.total`（实测约 97% 的消息能命中单价表）
   - **周期**：固定四档 `today` / `24h` / `7d` / `30d`，外加**额度窗口**——GLM / Kimi / OpenCode Go / MiniMax / Command Code 的实时额度接口会带回窗口长度与重置时刻，面板用 `resetAt - spanMs` 反推窗口起点，因此「5h 窗口已用 token」与官方百分比是同一个窗口（明细表里带 `⟲` 标记）；没有额度接口的订阅可用 `subscriptions[].quotaWindows` 手工声明
   - **形态：pi-subagents fleet inspector 同款的交互浮层**（`ctx.ui.custom` + `overlay: true`，居中 95% 宽、最多 85% 高、带边框）。**键盘可交互**（custom 会把焦点交给浮层组件）：`↑↓`/`jk` 切订阅 · `←→` 切热力图周期 · `h` 切 tokens/费用 · `r` 强制重扫 · `Esc`/`q` 关闭。边框外露出的是底层正常 UI（聊天 / 右侧分栏），关闭后焦点自动回编辑器
@@ -120,7 +121,10 @@ pi remove git:github.com/Lqg97/pi-statusbar
  "hiddenMetrics": [],
  // 配置面板显示语言："zh" / "en"（默认 zh），/statusbar 菜单语言行 ←→ 切换
  "language": "zh",
- // 订阅列表（/statusbar subs 的统计口径）；缺省空数组 = 面板只显示「未归属」汇总
+ // 未被 subscriptions[] 命中的 provider 是否自动成行（默认 true）：行名就是 provider id，
+ // 按 token 量降序排在配置行之后；false = 未命中的用量一律进「未归属」
+ "autoDiscoverSubs": true,
+ // 订阅列表：配了就用你的名字/套餐/账期/额度窗口；没配的 provider 会自动成行
  // 归属：providerFilter 全局优先于 modelFilter，同层按配置顺序先到先得；两者都缺省的条目永不自动归属
  "subscriptions": [
   // providerFilter 匹配 provider id（精确或子串，大小写不敏感）
@@ -151,7 +155,9 @@ pi remove git:github.com/Lqg97/pi-statusbar
 
 ### 订阅用量统计（`subscriptions`）
 
-`/statusbar subs` 打开的交互浮层（居中、带边框、不占用布局），按订阅展示各周期 token 与 API 等价费用 + 7×24 热力图。配置只需在 `statusbar.json` 加一个 `subscriptions` 数组（见上面的配置示例）：
+`/statusbar subs` 打开的交互浮层（居中、带边框、不占用布局），按订阅展示各周期 token 与 API 等价费用 + 7×24 热力图。
+
+**零配置可用**：面板的行 = `subscriptions[]` 里配的（优先）+ **扫到但没被任何条目命中的 provider 自动成行**（行名 = provider id，按 token 量降序）+ 最后一行「未归属」。所以换个新 provider 不用改配置，用量直接看得见。`subscriptions[]` 只在你想**改名、补套餐/账期、归并多个 provider、或声明额度窗口**时才需要写（见上面的配置示例）：
 
 | 字段 | 说明 |
 | --- | --- |
@@ -163,7 +169,8 @@ pi remove git:github.com/Lqg97/pi-statusbar
 
 几条口径说明：
 
-- **未归属单独成行**：没被任何 `providerFilter`/`modelFilter` 命中的事件会归入「未归属」，避免配漏一条订阅时用量凭空消失。**两个过滤器都不填的条目永不自动归属**，防止一个空过滤器吃掉全部用量
+- **先配置、后自动**：先按 `subscriptions[]` 归属（命中就用你的行名与元信息），剩下的才按 provider 自动成行——所以自动行不会跟配置行重复计数。自动行的额度窗口也能自动认出来（该 provider 命中已知额度接口时），无需 `providerFilter`
+- **未归属单独成行**：`provider` 为空的事件（无法命名，多为早期日志）会归入「未归属」，避免配漏一条订阅时用量凭空消失。**两个过滤器都不填的条目永不自动归属**，防止一个空过滤器吃掉全部用量；这类条目在自动发现下也不会“抢”走任何 provider（先按配置归属，剩下才自动成行）
 - **多条订阅同时命中时按配置顺序先到先得**；但 `providerFilter` 是全局优先层，所以把一条宽松的 `modelFilter` 写在前面，也不会抢走 `providerFilter` 能明确归属的用量
 - **额度窗口对齐**：会话日志里只有 token、没有窗口边界，所以 5h/周/月 这类窗口由 provider 的重置时刻反推起点（`resetAt - spanMs`）。明细表里 `used` 列的 `⟲` 表示该窗口已对齐（此时「已用 token」与官方百分比同窗口，可直接对照，不会出现「显示 12% 但本地按 now-5h 算出的用量偏高/偏低」）
 - **与 ai-sub-dashboard 的数字可能不同**：dashboard 只按**模型名归一化**查单价，本扩展按 **`provider:model` 精确键**查（即 footer 的同一套 `priceTable`），两者在某些模型上会选到不同的 models.dev 条目（例如订阅制端点 dashboard 会取到 0 价条目）。本扩展的选择与 pi 自己写的 `usage.cost.total` 逐条一致，想要固定来源可用 `priceMap` 覆盖
