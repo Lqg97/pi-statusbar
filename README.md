@@ -10,12 +10,13 @@
 main │ ↑12.3k ↓45.6k ⚡100k·85% $0.123 ⏱980ms 128 tok/s │ ▰▰▰▱▱▱▱▱▱▱ 23% │ GLM 5h 12%(3h56m)·1周 34%(6d10h) │ glm-5.3·high │ LSP Active
 ```
 
-四种布局（`layout`）可选：
+五种布局（`layout`）可选：
 
 - **底部单行 footer**（`bottom`，上面的示例）
 - **右侧浮层**（`right`）：类 opencode 的悬浮信息面板，浮在聊天上、遮右缘
 - **右侧分栏**（`split`）：占一列、聊天按剩余宽度重新换行，完全不遮挡，仅 fullscreen 模式可用
-- **自动**（`auto`，默认）：按终端宽度在浮层与底部单行之间切换
+- **自动右侧浮层**（`auto`，默认）：按终端宽度在浮层与底部单行之间切换
+- **自动右侧分栏**（`auto-split`）：按终端宽度在分栏与底部单行之间切换（宽度阈值 `autoMinWidth`，默认 120）
 
 ## 功能
 
@@ -45,8 +46,8 @@ main │ ↑12.3k ↓45.6k ⚡100k·85% $0.123 ⏱980ms 128 tok/s │ ▰▰▰�
   - **性能**：扫描结果按文件 `mtime`+`size` 增量缓存到 `~/.pi/agent/.statusbar-subs-cache.json`；热启动约 10ms，首次全量约 0.5s（实测 133MB / 137 文件 / 约 1.2 万条唯一消息），期间每 8 个文件让出一次事件循环，不卡 TUI
 - **终端标题**：会话名写入终端标题（`pi · 会话名`），不占 footer 宽度（VSCode/Cursor 内置终端看不到时见「排障」）
 - **窄终端自适应**：按 扩展状态 → 额度/token → 模型 的顺序逐段收起，仍放不下时整段换行成多行（分支与上下文永不丢弃）
-- **布局可选（layout）**：`bottom` / `right` / `auto`（默认）/ `split` 右侧分栏，详见「布局」一节
-- **Agent 面板入栏**：`split` 分栏时把 pi-subagents 的异步 agent 面板搬进右栏（状态卡片下方），点击折叠等交互保留；默认开，`/statusbar dock on|off` 或交互菜单切换
+- **布局可选（layout）**：`bottom` / `right` / `auto` 自动浮层（默认）/ `auto-split` 自动分栏 / `split` 始终分栏，详见「布局」一节
+- **Agent 面板入栏**：分栏布局（`split` / `auto-split`）下把 pi-subagents 的异步 agent 面板搬进右栏（状态卡片下方），点击折叠等交互保留；默认开，`/statusbar dock on|off` 或交互菜单切换
 - **指标显隐可配置**：交互式勾选要展示的指标（分支 / 上下文 / 模型 / effort / 用量 / TTFT / 吞吐 / 额度 / 扩展状态），即时预览，保存写回配置文件 `hiddenMetrics` 字段
 - **配置面板中英双语**：`language` 配置项或菜单内 ←→ 实时切换，菜单/指标选择器/提示文案跟随语言
 - **单一命令 `/statusbar`**：无参数打开交互式菜单，集中管理布局、边框、填充、Agent 入栏、语言、指标显隐与启停；也支持子命令快捷方式。新会话默认恢复自定义样式
@@ -93,18 +94,22 @@ pi remove git:github.com/Lqg97/pi-statusbar
  },
  // 按文本包含隐藏其他扩展的 footer 状态（默认 ["LSP Inactive"]）
  "hideExtStatuses": ["LSP Inactive"],
- // 布局："bottom" 底部单行 / "right" 右侧浮层（浮在聊天上）/ "auto" 按宽度自动（默认）
+ // 布局："bottom" 底部单行 / "right" 右侧浮层（浮在聊天上）
+ //       / "auto" 自动右侧浮层（默认）/ "auto-split" 自动右侧分栏
  //       / "split" 右侧分栏（占一列、聊天按剩余宽度重新换行、完全不遮挡，仅 fullscreen 可用）
- //       split 时扩展会自动把 pi 的 tuiMode 设为 fullscreen（切回其他布局时还原）
+ //       split / auto-split 时扩展会自动把 pi 的 tuiMode 设为 fullscreen（切回其他布局时还原）
  "layout": "auto",
  // 右侧面板宽度（列），默认 32，范围 [20, 60]
  "rightWidth": 32,
+ // 两种 auto 模式的宽度阈值（列），默认 120，范围 [40, 400]：
+ // 终端 ≥ 该值时切到右侧（auto 用浮层 / auto-split 用分栏），否则底部单行
+ "autoMinWidth": 120,
  // 面板边框字符集："auto"（默认，只跟随 PI_STATUSBAR_BORDER 环境变量）/ "unicode"（┌─┐│└┘）/ "ascii"（+ - |）。
  // 注：曾按 TERM_PROGRAM=vscode 自动猜 ascii，实测那类「边框错位」残影来自终端渲染器本身、
  // 与方框字形无关（ascii 并不能修），已去掉猜测，只留手动切换；也可用 /statusbar border 切换
  "panelBorder": "auto",
  // 分栏面板是否把边框铺满整屏高度：true（默认）/ false（高度贴内容）。
- // 只对 layout=split 有意义（浮层本来就贴合内容）；也可用 /statusbar fill on|off
+ // 只对分栏布局（split / auto-split）有意义（浮层本来就贴合内容）；也可用 /statusbar fill on|off
  "panelFill": true,
  // split 分栏时把 pi「编辑器上方」的 widget 容器（pi-subagents 的 agent 面板）搬进右栏：
  // 状态面板在上、agent 面板在下，点击折叠等交互保留（默认 true）。
@@ -165,25 +170,39 @@ pi remove git:github.com/Lqg97/pi-statusbar
 
 ## 布局
 
-`auto` 模式下终端 ≥120 列时状态收进右侧竖卡（Branch / Ctx / Model / In / Out / Cache / Cost / TTFT / Speed / Quota 每行一项，带边框），底部 footer 让位；<120 列时回到单行 footer。右侧竖卡有两种实现：
+两种自动模式（`auto` / `auto-split`）都按终端宽度自动切换（阈值 `autoMinWidth`，默认 120，范围 `[40, 400]`，可配），resize 实时生效、无需重启会话：
 
-- **右侧浮层（`layout: "right"` / `auto`）**：非捕获 overlay，不抢键盘焦点，但会**遮住聊天内容右缘**（regular 模式没有布局树，pi 扩展 API 无法分栏）。
-- **右侧分栏（`layout: "split"`）**：把 pi 的核心布局根（transcript + 底部 dock）包进 `HStack`，右侧挂状态卡片——**与 opencode 的 `flexDirection="row"` 同构**：聊天按剩余宽度重新换行，整屏高卡片，不遮挡任何内容。它是显式选择，所以**不再套 `auto` 的 120 列阈值**：只要宽度 ≥ `rightWidth + 24` 就分栏（避免把聊天压成一条），更窄才退回底部单行。
+| `layout` | ≥ `autoMinWidth` | < `autoMinWidth` |
+| --- | --- | --- |
+| `auto`（默认） | 右侧浮层 | 底部单行 |
+| `auto-split` | 右侧分栏 | 底部单行 |
 
-右侧分栏的前提是 **fullscreen 模式**（alt-screen，只有它有布局树）。这个前提**不用你手动配**：布局切到 `split` 时扩展会自己把 pi settings.json 的 `tuiMode` 写成 `"fullscreen"`（改前的值存到 `statusbar.json` 的 `tuiModeBackup`，切回其他布局时还原），所以**只配一个字段就够了**。
+进入右侧时状态收进竖卡（Branch / Ctx / Model / In / Out / Cache / Cost / TTFT / Speed / Quota 每行一项，带边框），底部 footer 让位。竖卡有两种实现：
+
+- **右侧浮层（`auto` / `right`）**：非捕获 overlay，不抢键盘焦点，但会**遮住聊天内容右缘**（regular 模式没有布局树，pi 扩展 API 无法分栏）。
+- **右侧分栏（`auto-split` / `split`）**：把 pi 的核心布局根（transcript + 底部 dock）包进 `HStack`，右侧挂状态卡片——**与 opencode 的 `flexDirection="row"` 同构**：聊天按剩余宽度重新换行，整屏高卡片，不遮挡任何内容。`split` 是显式选择，所以**不再套 `autoMinWidth` 阈值**：只要宽度 ≥ `rightWidth + 24` 就分栏（避免把聊天压成一条），更窄才退回底部单行；`auto-split` 则同时要求 ≥ `autoMinWidth` 与 ≥ `rightWidth + 24`。
+
+想调宽度阈值只改一个字段（两种自动模式共用）：
+
+```json
+{ "layout": "auto-split", "autoMinWidth": 100, "rightWidth": 28 }
+```
+
+右侧分栏的前提是 **fullscreen 模式**（alt-screen，只有它有布局树）。这个前提**不用你手动配**：布局切到 `split` / `auto-split` 时扩展会自己把 pi settings.json 的 `tuiMode` 写成 `"fullscreen"`（改前的值存到 `statusbar.json` 的 `tuiModeBackup`，切回其他布局时还原），所以**只配一个字段就够了**。
 
 （旧配置里单独的 `"split": true` 会在读取时自动迁移为 `"layout": "split"`，无需手改。）
 
 只需注意生效时机：TUI mode 是启动时读取的，所以：
 
 ```text
-/statusbar layout split   →  提示「已自动把 TUI mode 设为 fullscreen：重启 pi 后生效」
-重启 pi                    →  右侧直接变成右侧分栏
+/statusbar layout split        →  提示「已自动把 TUI mode 设为 fullscreen：重启 pi 后生效」
+/statusbar layout auto-split   →  同上（分栏要等重启后才能用，本次会话先走底部单行）
+重启 pi                        →  右侧直接变成右侧分栏（auto-split 下宽够才分栏）
 ```
 
 （也可以 `/settings` → TUI mode 当场切，效果一样。）外部写入不会被 pi 覆盖：pi 保存 settings.json 时只合并「本次修改的字段」，其他字段原样保留。
 
-regular 模式下选 `split` 不会报错，而是退回底部单行、且**不再创建浮层**——因为浮层会让 pi 拒绝切换 TUI mode（`Close active overlays before changing TUI mode`）。
+regular 模式下选 `split` / `auto-split` 不会报错，而是退回底部单行、且**不再创建浮层**——因为浮层会让 pi 拒绝切换 TUI mode（`Close active overlays before changing TUI mode`）。`auto-split` 在这时还会顺手把 pi 的 `tuiMode` 补成 `fullscreen`（同样提示重启），下次启动就真能分栏。
 
 ### Agent 面板入栏（dockWidgetsInSplit，默认开）
 
@@ -193,19 +212,19 @@ regular 模式下选 `split` 不会报错，而是退回底部单行、且**不�
 - 鼠标点击折叠等交互按布局位置命中，搬动后照常可用
 - 入栏期间 `panelFill` 自动让位：状态面板贴内容，agent 面板占剩余高度
 - `/statusbar dock on|off` 或交互菜单切换，立即重排
-- 仅 `split` 生效：其余布局（底部单行/浮层）不动布局树，agent 面板仍在底部
+- 仅分栏布局（`split` / `auto-split`）生效：其余布局（底部单行/浮层）不动布局树，agent 面板仍在底部
 
 ## 命令
 
 | 命令 | 说明 |
 | --- | --- |
-| `/statusbar` | 无参数打开交互式菜单：布局（auto/bottom/right/split）/ 面板边框 / 面板填充 / Agent 面板入栏 / 语言（光标在对应行时 ←→ 调值，即时生效并写回配置）/ 指标显隐（↑↓ 选择、Space 切换、Enter 保存、Esc 取消）/ 订阅统计 / 启用停用；Enter 确认、Esc 退出 |
+| `/statusbar` | 无参数打开交互式菜单：布局（auto/auto-split/bottom/right/split）/ 面板边框 / 面板填充 / Agent 面板入栏 / 语言（光标在对应行时 ←→ 调值，即时生效并写回配置）/ 指标显隐（↑↓ 选择、Space 切换、Enter 保存、Esc 取消）/ 订阅统计 / 启用停用；Enter 确认、Esc 退出 |
 | `/statusbar on\|off` | 启用 / 停用自定义状态栏（停用后恢复内置 footer） |
-| `/statusbar layout [right\|bottom\|auto\|split]` | 切换布局并写回配置，不带参数时按 自动 → 底部 → 右侧 → 右侧分栏 循环；选 `split` 会自动把 pi 的 `tuiMode` 设为 `fullscreen`（切走时还原） |
-| `/statusbar split [on\|off]` | `layout split` 的快捷别名：`on` = 右侧分栏，`off` = 回到默认布局；不带参数时取反 |
+| `/statusbar layout [right\|bottom\|auto\|auto-split\|split]` | 切换布局并写回配置，不带参数时按 自动浮层 → 自动分栏 → 底部 → 右侧浮层 → 右侧分栏 循环；选 `split` / `auto-split` 会自动把 pi 的 `tuiMode` 设为 `fullscreen`（切走时还原） |
+| `/statusbar split [on\|off]` | `layout split` 的快捷别名：`on` = 右侧分栏（`layout split`），`off` = 回到默认布局（`auto`）；不带参数时取反（已是 `split` / `auto-split` 则关掉） |
 | `/statusbar border [auto\|unicode\|ascii]` | 面板边框字符集（写回 `panelBorder` 并立即重绘），不带参数时按 auto → unicode → ascii 循环 |
-| `/statusbar fill [on\|off]` | 分栏面板是否铺满整屏高度（写回 `panelFill` 并立即重绘），不带参数时取反；只对 `layout: split` 生效 |
-| `/statusbar dock [on\|off]` | split 分栏时把 agent 面板（pi-subagents 的异步任务 widget）搬进右栏（写回 `dockWidgetsInSplit` 并立即重排），不带参数时取反 |
+| `/statusbar fill [on\|off]` | 分栏面板是否铺满整屏高度（写回 `panelFill` 并立即重绘），不带参数时取反；只对分栏布局（`split` / `auto-split`）生效 |
+| `/statusbar dock [on\|off]` | 分栏布局（`split` / `auto-split`）下把 agent 面板（pi-subagents 的异步任务 widget）搬进右栏（写回 `dockWidgetsInSplit` 并立即重排），不带参数时取反 |
 | `/statusbar metrics` | 直接进入指标显隐交互式配置 |
 | `/statusbar subs` | 打开订阅用量统计**交互浮层**（各周期 token / API 等价费用 + 7×24 热力图）；`↑↓`/`jk` 切订阅 · `←→` 切周期 · `h` 切指标 · `r` 重扫 · `Esc`/`q` 关闭 |
 | `/statusbar quota` | 强制刷新订阅额度并显示详情 |
@@ -215,7 +234,7 @@ regular 模式下选 `split` 不会报错，而是退回底部单行、且**不�
 ## 兼容性
 
 - pi 核心包（`@earendil-works/pi-ai` / `pi-coding-agent` / `pi-tui`）由 pi 内置提供，声明为 **optional** peerDependencies：安装时不会重复拉一份 pi 本体（实测首装 ~0.1MB；若声明成必需 peer 会被 npm 连带装 249MB），扩展本身也没有第三方运行时依赖
-- `layout: "split"` 与「Agent 面板入栏」依赖较新 pi-tui 的 `HStack` / `VStack` 布局组件；旧版 pi 会静默退回底部单行——看不到分栏时请先升级 pi
+- `layout: "split"` / `"auto-split"` 与「Agent 面板入栏」依赖较新 pi-tui 的 `HStack` / `VStack` 布局组件；旧版 pi 会静默退回底部单行——看不到分栏时请先升级 pi
 - 花费计算含阶梯定价，逻辑与 pi-ai 的 `calculateCost` 一致
 - 生成中的 tok/s 按字符估算（英文 ~4 字符/token，CJK ~1.5 字符/token），带 `~` 前缀；响应结束后显示精确值
 

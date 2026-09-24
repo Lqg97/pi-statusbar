@@ -64,23 +64,31 @@
  *     两者都缺省的条目永不自动归属（避免一个空过滤器吃掉全部用量）。
  * - /exit 为 /quit 的别名，优雅退出 pi
  * - 窄终端先按 扩展状态 → 额度/token → 模型 的顺序收起，仍放不下则整段换行成多行（分支与上下文永不丢弃）
- * - 布局可配置（layout）：bottom 底部单行 / right 右侧浮层（浮在聊天上）/ auto（默认）/ split 右侧分栏
- *   auto 按终端宽度自动选择：≥120 列用右侧浮层，否则底部单行，resize 实时切换；
+ * - 布局可配置（layout）：bottom 底部单行 / right 右侧浮层（浮在聊天上）/ auto 自动右侧浮层（默认）
+ *   / auto-split 自动右侧分栏 / split 右侧分栏
+ *   两种 auto 模式都按终端宽度自动选择（阈值 autoMinWidth，默认 120 列），resize 实时切换：
+ *   auto       = ≥autoMinWidth 用右侧浮层，否则底部单行；
+ *   auto-split = ≥autoMinWidth 用右侧分栏，否则底部单行；
  *   浮层为非捕获 overlay（不抢键盘焦点），宽度由 rightWidth 配置（默认 32 列）；
  *   注意：浮层浮在聊天内容之上，会遮住右缘内容（regular 模式没有布局树，pi 扩展 API 无法真分栏）；
  *   split = 右侧分栏（类 opencode：把核心布局根包进 HStack，聊天按剩余宽度重新换行，完全不遮挡），
- *   只要宽度 ≥ rightWidth+24 就用分栏（不套 auto 的 120 列阈值）；
+ *   只要宽度 ≥ rightWidth+24 就用分栏（不套 auto 的阈值）；
  *   右侧分栏只在 fullscreen 模式（alt-screen）下成立，regular 模式/极窄终端自动退回底部单行，
- *   且不再创建浮层（浮层会挡住 /settings 切换 TUI mode）；
+ *   且不再创建浮层（浮层会挡住 /settings 切换 TUI mode）；auto-split 在 regular 模式下
+ *   会像 split 一样自动把 pi 的 tuiMode 补成 fullscreen（提示重启），本次会话仍走底部单行；
  *   /statusbar 无参数打开交互式菜单（布局 ◀▶ 调值 / 面板边框 / 指标显隐 / 启停；Enter 确认，Esc 退出），
- *   或子命令快捷方式：/statusbar [on|off] | layout [right|bottom|auto|split] | split [on|off] | metrics
+ *   或子命令快捷方式：/statusbar [on|off] | layout [right|bottom|auto|auto-split|split] | split [on|off] | metrics
  * - 新会话默认恢复自定义样式
  * - 用户配置 ~/.pi/agent/statusbar.json（环境变量 PI_STATUSBAR_CONFIG 可覆盖路径）：
  *     priceMap         本地模型 → models.dev 单价映射，key 为 "provider:model" 或裸 "model"
  *     hideExtStatuses  按文本包含隐藏的其他扩展状态（默认 ["LSP Inactive"]）
- *     layout           "bottom" | "right" | "auto" | "split"（默认 "auto"）；split = 右侧分栏，
+ *     layout           "bottom" | "right" | "auto" | "auto-split" | "split"（默认 "auto"）；
+ *                      auto = 自动右侧浮层，auto-split = 自动右侧分栏，split = 始终右侧分栏；
  *                      旧配置的 split: true 会自动迁移为 layout: "split"
  *     rightWidth       右侧面板宽度，默认 32，范围 [20, 60]
+ *     autoMinWidth     两种 auto 模式的宽度阈值（列），默认 120，范围 [40, 400]；
+ *                      ≥ 该值才切到右侧（auto 用浮层 / auto-split 用分栏），否则底部单行
+ *                      （auto-split 另需满足 rightWidth+24，避免把聊天压成一条）
  *     panelBorder      面板边框字符集 "auto"（默认，只跟随 PI_STATUSBAR_BORDER 环境变量）
  *                      | "unicode"（┌─┐│└┘）| "ascii"（+ - |）；也可用 /statusbar border [auto|unicode|ascii] 切换
  *     panelFill        分栏面板是否把边框铺满整屏高度（默认 true）；false = 高度贴内容。
@@ -190,11 +198,17 @@ interface QuotaSource {
 /** 状态栏布局：
  *  bottom      底部单行 footer
  *  right       右侧浮层（overlay，始终）
- *  auto        终端列数 ≥ AUTO_MIN_WIDTH 时用右侧浮层，否则底部单行（默认）
+ *  auto        终端列数 ≥ autoMinWidth 时用右侧浮层，否则底部单行（默认）
+ *  auto-split  终端列数 ≥ autoMinWidth 时用右侧分栏，否则底部单行
  *  split       右侧分栏（fullscreen 布局分栏，聊天按剩余宽度重新换行、完全不遮挡）；
  *              宽度 ≥ rightWidth + 24 时生效，否则回退底部单行；regular 模式/缺 HStack 同样回退
  */
-type LayoutMode = "bottom" | "right" | "auto" | "split";
+type LayoutMode = "bottom" | "right" | "auto" | "auto-split" | "split";
+
+/** 分栏族布局：显式 split 与自动分栏 auto-split —— 都需要 fullscreen + 分栏安装逻辑 */
+function isSplitLike(m: LayoutMode): boolean {
+	return m === "split" || m === "auto-split";
+}
 
 interface StatusbarConfig {
 	/** 本地模型 → models.dev 单价映射：key 为本地 "provider:model" 或裸 "model"，value 为 [models.dev provider, 模型 id] */
@@ -207,6 +221,9 @@ interface StatusbarConfig {
 	layout: LayoutMode;
 	/** 右侧面板宽度（列），默认 32，读取时 clamp 到 [20, 60] */
 	rightWidth: number;
+	/** 两种 auto 模式的宽度阈值（列），默认 120，读取时 clamp 到 [40, 400]。
+	 *  auto / auto-split 都在终端列数 ≥ 该值时切到右侧，否则底部单行 */
+	autoMinWidth: number;
 	/** 开启 layout=split 时自动改写 pi settings.json 的 tuiMode，这里记录改前的值以便切回时还原。
 	 *  缺省 = 从未改过；"none" = 原本没有该字段（切回时删除）；"regular"/"fullscreen" = 原值 */
 	tuiModeBackup?: string;
@@ -298,11 +315,24 @@ const METRICS: { key: MetricKey; zh: string; en: string }[] = [
 	{ key: "ext", zh: "其他扩展状态", en: "Extension statuses" },
 ];
 
-const LAYOUT_ORDER: LayoutMode[] = ["auto", "bottom", "right", "split"];
+const LAYOUT_ORDER: LayoutMode[] = [
+	"auto",
+	"auto-split",
+	"bottom",
+	"right",
+	"split",
+];
 const LAYOUT_LABELS: Record<Lang, Record<LayoutMode, string>> = {
-	zh: { auto: "自动", bottom: "底部单行", right: "右侧浮层", split: "右侧分栏" },
+	zh: {
+		auto: "自动浮层",
+		"auto-split": "自动分栏",
+		bottom: "底部单行",
+		right: "右侧浮层",
+		split: "右侧分栏",
+	},
 	en: {
-		auto: "Auto",
+		auto: "Auto overlay",
+		"auto-split": "Auto column",
 		bottom: "Bottom",
 		right: "Right overlay",
 		split: "Right column",
@@ -459,13 +489,31 @@ const BORDER_CHARS: Record<
 	unicode: { h: "─", v: "│", tl: "┌", tr: "┐", bl: "└", br: "┘" },
 	ascii: { h: "-", v: "|", tl: "+", tr: "+", bl: "+", br: "+" },
 };
-/** auto 模式阈值：终端列数 ≥ 该值时使用右侧浮层 */
-const AUTO_MIN_WIDTH = 120;
+/** 两种 auto 模式的默认宽度阈值：终端列数 ≥ 该值时切到右侧（auto 用浮层 / auto-split 用分栏） */
+const DEFAULT_AUTO_MIN_WIDTH = 120;
+const MIN_AUTO_MIN_WIDTH = 40;
+const MAX_AUTO_MIN_WIDTH = 400;
 
 function toLayoutMode(v: unknown, legacySplit = false): LayoutMode {
-	if (v === "bottom" || v === "right" || v === "auto" || v === "split") return v;
+	if (
+		v === "bottom" ||
+		v === "right" ||
+		v === "auto" ||
+		v === "auto-split" ||
+		v === "split"
+	)
+		return v;
 	// 旧配置的 split: true 迁移为 layout: "split"
 	return legacySplit ? "split" : DEFAULT_LAYOUT;
+}
+
+function toAutoMinWidth(v: unknown): number {
+	if (typeof v !== "number" || !Number.isFinite(v))
+		return DEFAULT_AUTO_MIN_WIDTH;
+	return Math.min(
+		MAX_AUTO_MIN_WIDTH,
+		Math.max(MIN_AUTO_MIN_WIDTH, Math.round(v)),
+	);
 }
 
 function toRightWidth(v: unknown): number {
@@ -608,6 +656,7 @@ function loadConfig(): StatusbarConfig {
 				: [...DEFAULT_HIDE_EXT_STATUSES],
 			layout: toLayoutMode(raw?.layout, raw?.split === true),
 			rightWidth: toRightWidth(raw?.rightWidth),
+			autoMinWidth: toAutoMinWidth(raw?.autoMinWidth),
 			panelBorder: toPanelBorder(raw?.panelBorder),
 			panelFill: raw?.panelFill !== false,
 			dockWidgetsInSplit: raw?.dockWidgetsInSplit !== false,
@@ -623,6 +672,7 @@ function loadConfig(): StatusbarConfig {
 			hideExtStatuses: [...DEFAULT_HIDE_EXT_STATUSES],
 			layout: DEFAULT_LAYOUT,
 			rightWidth: DEFAULT_RIGHT_WIDTH,
+			autoMinWidth: DEFAULT_AUTO_MIN_WIDTH,
 			panelBorder: DEFAULT_PANEL_BORDER,
 			panelFill: DEFAULT_PANEL_FILL,
 			dockWidgetsInSplit: true,
@@ -646,6 +696,7 @@ function saveConfigPatch(patch: Record<string, unknown>): void {
 			hideExtStatuses: config.hideExtStatuses,
 			layout: config.layout,
 			rightWidth: config.rightWidth,
+			autoMinWidth: config.autoMinWidth,
 			panelBorder: config.panelBorder,
 			panelFill: config.panelFill,
 			dockWidgetsInSplit: config.dockWidgetsInSplit,
@@ -3148,11 +3199,37 @@ export default function (pi: ExtensionAPI) {
 	let panelAlive = false;
 	let panelPending = false;
 
-	/** 当前宽度下是否应由右侧面板接管展示 */
+	/** 当前宽度下是否应由右侧浮层接管展示（仅 auto / right；分栏族走 splitActive） */
 	function panelActive(width: number): boolean {
 		return (
-			layoutMode === "right" || (layoutMode === "auto" && width >= AUTO_MIN_WIDTH)
+			layoutMode === "right" ||
+			(layoutMode === "auto" && width >= config.autoMinWidth)
 		);
+	}
+
+	/**
+	 * 当前宽度下是否应由右侧分栏接管展示。
+	 *  split 是显式选择：只看 splitWidthOk（不套 auto 阈值）；
+	 *  auto-split 还要求 ≥ autoMinWidth，并同样保证聊天区至少 24 列。
+	 */
+	function splitActive(width: number): boolean {
+		if (layoutMode === "split") return splitWidthOk(width);
+		if (layoutMode === "auto-split")
+			return width >= config.autoMinWidth && splitWidthOk(width);
+		return false;
+	}
+
+	/**
+	 * 分栏过渡帧：分栏族布局下、分栏马上要装上但还没装好。
+	 * 此时让浮层先顶住，避免切换过程中出现“既无分栏也无浮层”的空帧；
+	 * 反过来，regular 模式/缺 HStack 时永远为 false —— 那种情况下分栏根本装不上，
+	 * 浮层必须隐掉（存活的可视浮层会让 pi 拒绝切换 TUI mode，用户就没法去 /settings 改 fullscreen）。
+	 */
+	function splitTransitionFrame(width: number): boolean {
+		if (!isSplitLike(layoutMode) || !splitActive(width)) return false;
+		const tui = activeTui;
+		if (!tui || !splitCapable(tui)) return false;
+		return !splitInstalled(tui);
 	}
 
 	/**
@@ -3478,8 +3555,8 @@ export default function (pi: ExtensionAPI) {
 									panelAlive &&
 									// 进分栏的过渡帧：分栏还没装好就先把浮层顶住，避免面板闪掉一帧；
 									// 装好了（或本来就未在切分栏）就按普通规则：只在该显示浮层时可见
-									(layoutMode === "split"
-										? !(activeTui && splitInstalled(activeTui))
+									(isSplitLike(layoutMode)
+										? splitTransitionFrame(w)
 										: panelActive(w)),
 							}),
 						},
@@ -3642,7 +3719,7 @@ export default function (pi: ExtensionAPI) {
 		return typeof t.setLayoutRoot === "function" && "layoutRoot" in tui;
 	}
 
-	/** 分栏可用宽度下限：内容区至少留 24 列（layout=right 在极窄终端下不把聊天压成一条） */
+	/** 分栏可用宽度下限：聊天内容区至少留 24 列（否则右侧竖卡会把聊天压成一条） */
 	function splitWidthOk(width: number): boolean {
 		return width >= config.rightWidth + 24;
 	}
@@ -3659,7 +3736,7 @@ export default function (pi: ExtensionAPI) {
 	 * 幂等；微任务延迟，不在 render 周期内同步改写布局树。
 	 */
 	function ensureSplit(tui: TUI, theme: Theme): void {
-		if (layoutMode !== "split" || splitPending || !splitCapable(tui)) return;
+		if (!isSplitLike(layoutMode) || splitPending || !splitCapable(tui)) return;
 		const t = asLayoutRootHost(tui);
 		const cur = t.layoutRoot;
 		if (!cur) return;
@@ -3667,7 +3744,7 @@ export default function (pi: ExtensionAPI) {
 		splitPending = true;
 		queueMicrotask(() => {
 			splitPending = false;
-			if (layoutMode !== "split" || !userWants || !splitCapable(tui)) return;
+			if (!isSplitLike(layoutMode) || !userWants || !splitCapable(tui)) return;
 			const root = t.layoutRoot;
 			if (!root) return;
 			const basis = config.rightWidth;
@@ -3822,15 +3899,25 @@ export default function (pi: ExtensionAPI) {
 					// 分栏 / 浮层 / 底部单行 三态切换：尽量保证每一帧都有面板，且不做整屏清屏（会闪）
 					// 分栏下 footer 收到的宽度已被侧栏扣掉，归属判定用整个视口宽度
 					const fullW = splitViewportW || tui.terminal.columns;
-					if (layoutMode === "split") {
-						// layout=split 是显式选择：只要装得下（≥ rightWidth+24）就分栏，不再叠一层 auto 的 120 列阈值
-						if (splitWidthOk(fullW)) {
+					if (isSplitLike(layoutMode)) {
+						// split / auto-split：显式 split 只要装得下（≥ rightWidth+24）就分栏，
+						// 不套 auto 阈值；auto-split 另需 ≥ autoMinWidth
+						const capable = splitCapable(tui);
+						// 分栏族不需要浮层；装不上时更要确保没有存活浮层，
+						// 否则 pi 会以 “Close active overlays before changing TUI mode” 拒绝切到 fullscreen。
+						// 微任务延迟：不在 render 周期内同步变更 overlay 栈（与 ensurePanel 同理）
+						if (!capable && (panelAlive || panelPending)) {
+							queueMicrotask(() => {
+								if (isSplitLike(layoutMode) && !splitCapable(activeTui)) closePanel();
+							});
+						}
+						if (splitActive(fullW)) {
 							ensureSplit(tui, theme);
 							// 本帧就会装上（pending）或已装好：让位。
 							// 只有“确实装不上”（非 pending）时才回退渲染底部单行
 							if (splitPending || splitInstalled(tui)) return [];
 						} else if (splitWrapper) {
-							closeSplit(); // 极窄终端：拆掉退回底部单行
+							closeSplit(); // 宽度不够：拆掉退回底部单行
 						}
 					} else if (panelActive(fullW)) {
 						// 该显示浮层：先把浮层起起来，就绪后再拆分栏，避免中间出现无面板的帧
@@ -4037,10 +4124,10 @@ export default function (pi: ExtensionAPI) {
 				on
 					? `${th.fg("accent", "◀")} ${th.fg("accent", text)} ${th.fg("accent", "▶")}`
 					: `${th.fg("dim", "◀")} ${th.fg("muted", text)} ${th.fg("dim", "▶")}`;
-			// 行 0：布局（auto / bottom / right / split；进出 split 会同步 pi 的 tuiMode 并写回配置）
+			// 行 0：布局（auto / auto-split / bottom / right / split；进出分栏族会同步 pi 的 tuiMode 并写回配置）
 			const layoutValue =
-				layoutMode === "split" && !splitCapable(activeTui)
-					? `${LAYOUT_LABELS[config.language].split} · ${T.splitNeedFullscreen}`
+				isSplitLike(layoutMode) && !splitCapable(activeTui)
+					? `${LAYOUT_LABELS[config.language][layoutMode]} · ${T.splitNeedFullscreen}`
 					: LAYOUT_LABELS[config.language][layoutMode];
 			lines.push(
 				menuRow(
@@ -4318,19 +4405,14 @@ export default function (pi: ExtensionAPI) {
 		// 面板位置/高度变了：普通重绘即可，不做整屏清屏（否则切换时会闪一下）
 		if (userWants) activeTui?.requestRender();
 
-		if (next !== "split" && prev !== "split") {
+		if (!isSplitLike(next) && !isSplitLike(prev)) {
 			if (!notify) return;
-			notify(
-				next === "auto"
-					? `状态栏布局: auto（终端 ≥${AUTO_MIN_WIDTH} 列时右侧浮层，否则底部单行）`
-					: `状态栏布局: ${LAYOUT_LABELS[config.language][next]}`,
-				"info",
-			);
+			notify(`状态栏布局: ${layoutModeLabel(next)}`, "info");
 			return;
 		}
 
-		const sync = syncPiTuiMode(next === "split");
-		if (next !== "split") {
+		const sync = syncPiTuiMode(isSplitLike(next));
+		if (!isSplitLike(next)) {
 			let msg: string = T.splitDisabled;
 			if (sync.failed) msg = T.splitSetFailed;
 			else if (sync.wrote) msg = T.splitRestored;
@@ -4342,7 +4424,12 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		if (splitCapable(activeTui)) {
-			notify?.(T.splitEnabled, "info");
+			notify?.(
+				next === "auto-split"
+					? `状态栏布局: ${layoutModeLabel("auto-split")}`
+					: T.splitEnabled,
+				"info",
+			);
 			return;
 		}
 		// 当前会话不是 fullscreen：配置已写好，重启 pi 后生效
@@ -4357,6 +4444,16 @@ export default function (pi: ExtensionAPI) {
 		setLayout(on ? "split" : DEFAULT_LAYOUT, (msg, type) =>
 			ctx.ui.notify(msg, type),
 		);
+	}
+
+	/** 布局的中文提示文案：auto / auto-split 带上当前阈值，其余用标签表 */
+	function layoutModeLabel(m: LayoutMode): string {
+		const n = config.autoMinWidth;
+		if (m === "auto")
+			return `自动浮层（终端 ≥${n} 列时右侧浮层，否则底部单行）`;
+		if (m === "auto-split")
+			return `自动分栏（终端 ≥${n} 列时右侧分栏，否则底部单行）`;
+		return LAYOUT_LABELS[config.language][m];
 	}
 
 	/**
@@ -4420,7 +4517,7 @@ export default function (pi: ExtensionAPI) {
 		activeTui?.requestRender();
 		notify?.(
 			`面板填充: ${on ? T.fillOn : T.fillOff}` +
-				(layoutMode === "split" ? "" : "（仅 layout=split 生效）"),
+				(isSplitLike(layoutMode) ? "" : "（仅分栏布局生效）"),
 			"info",
 		);
 	}
@@ -4450,7 +4547,7 @@ export default function (pi: ExtensionAPI) {
 		} catch {
 			// 写入失败不影响本次会话内的显示
 		}
-		if (layoutMode === "split" && activeTui && splitWrapper) {
+		if (isSplitLike(layoutMode) && activeTui && splitWrapper) {
 			closeSplit(); // 关掉时 undock 回底部；开启时由下一帧 ensureSplit 重新搬入
 			try {
 				activeTui.requestRender();
@@ -4460,7 +4557,7 @@ export default function (pi: ExtensionAPI) {
 		}
 		notify?.(
 			`Agent 面板: ${on ? T.dockIn : T.dockOut}` +
-				(layoutMode === "split" ? "" : "（仅 layout=split 生效）"),
+				(isSplitLike(layoutMode) ? "" : "（仅分栏布局生效）"),
 			"info",
 		);
 	}
@@ -4561,9 +4658,16 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (sub === "layout") {
 				const a = parts[1];
-				if (a && a !== "right" && a !== "bottom" && a !== "auto" && a !== "split") {
+				if (
+					a &&
+					a !== "right" &&
+					a !== "bottom" &&
+					a !== "auto" &&
+					a !== "auto-split" &&
+					a !== "split"
+				) {
 					ctx.ui.notify(
-						`无效布局: ${a}（可选 right / bottom / auto / split）`,
+						`无效布局: ${a}（可选 right / bottom / auto / auto-split / split）`,
 						"warning",
 					);
 					return;
@@ -4577,7 +4681,7 @@ export default function (pi: ExtensionAPI) {
 					ctx.ui.notify(`无效参数: ${a}（可选 on / off）`, "warning");
 					return;
 				}
-				applySplit(ctx, a ? a === "on" : layoutMode !== "split");
+				applySplit(ctx, a ? a === "on" : !isSplitLike(layoutMode));
 				return;
 			}
 			if (sub === "border") {
@@ -4755,7 +4859,7 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 		// 右侧分栏需要 fullscreen：自动补齐 pi 的 TUI mode，用户只需配 layout 一处；写成功才提示（避免每次 /new 都刷）
-		if (layoutMode === "split" && HAS_PI_TUI_HSTACK && !splitCapable(activeTui)) {
+		if (isSplitLike(layoutMode) && HAS_PI_TUI_HSTACK && !splitCapable(activeTui)) {
 			const sync = syncPiTuiMode(true);
 			if (sync.wrote) ctx.ui.notify(t().splitNeedsRestart, "info");
 			else if (sync.failed) ctx.ui.notify(t().splitSetFailed, "warning");
