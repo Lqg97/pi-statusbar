@@ -12,6 +12,10 @@
  *   按新模型单价重算；阶梯定价也按单次请求判定（与 pi-ai 的 calculateCost 一致）
  * - 上下文占用 ≥75% 变黄，≥90% 变红
  * - 订阅额度自动发现（按 provider baseUrl 匹配，只显示当前模型所属 provider 的额度）：
+ *     Codex（chatgpt.com）                      → ChatGPT OAuth 额度窗口已用百分比
+ *     GitHub Copilot（githubcopilot.com）       → 高级请求/聊天/补全配额；不限量显示 ∞
+ *     xAI OAuth（api.x.ai / grok.com）          → 真实订阅 credits / 按量消费 / 预付余额
+ *     Radius（radius.pi.dev）                   → 组织可用余额（扣除 reserved）
  *     GLM Coding Plan（bigmodel.cn / z.ai）      → 5h/周 token 窗口百分比 + 恢复倒计时
  *     Kimi（api.kimi.com）                       → 短窗口/周/月配额百分比 + 恢复倒计时
  *     DeepSeek 余额（deepseek.com）              → 按量账户余额（无重置概念）
@@ -25,47 +29,6 @@
  *     Novita AI（novita.ai）                     → 按量账户余额（无重置概念）
  *   每个窗口用量后括注 (恢复倒计时)（45s/13m/2h13m/6d4h；不足 24h 按 xhyym，超 24h 按 xdyyh，渲染时按重置时刻实时换算）；
  *   底部单行各窗口用 · 连接，右侧面板逐窗口分行；带 TTL 缓存，失败静默；/statusbar quota 强制刷新并显示详情
- * - 订阅用量统计（/statusbar subs，或交互菜单的「订阅统计」行）：**可交互浮层**
- *   （ctx.ui.custom + overlay: true，pi-subagents 的 fleet inspector 同款形态：居中
- *   95% 宽 / 最多 85% 高、带边框，四周露出底层正常 UI），按订阅列出各周期消耗的
- *   token 与 API 等价费用，并带 7×24 热力图。
- *     键盘交互（custom 会把焦点交给 overlay 组件）：↑↓/jk 切订阅 · ←→ 切热力图周期 ·
- *       h 切指标 · r 强制重扫 · Esc/q/ctrl+c 关闭；
- *     选中订阅的列表是视窗（❯ 始终可见，表头标当前范围），热力图自动跳过「窗口内 0 事件」
- *       的周期；
- *     高度自己算：bodyH = floor(rows*0.85)-4，行数恒定不抖动；组件自己画满整个矩形
- *       （每行严格 = width），pi 合成浮层时也会把浮层区域 pad 到声明宽度，
- *       区域内不会漏出底层；边框外露出的是聊天/右栏，属正常 UI。
- *     数据源：只扫 pi 自己的会话日志目录 ~/.pi/agent/sessions（递归所有 .jsonl；
- *     不依赖 ai-sub-dashboard 在跑）；
- *     只统计 type=message 的 assistant 行，按消息 id 跨文件去重（/tree fork 会复制历史消息）；
- *     费用与 footer 同源：priceTable（models.dev + models.json）逐条 calcCost，
- *     查不到单价时回落 pi 自己算的 usage.cost.total（实测 ~97% 命中单价表）。
- *     归属：subscriptions[].providerFilter 全局优先，其次 modelFilter，同层按配置顺序先到先得；
- *     未被任何条目命中、但带 provider 的事件按 provider 自动成行（行名就是 provider id，
- *     autoDiscoverSubs: false 可关）；provider 为空的事件单独归入「未归属」行，不会凭空消失；
- *     列表底部钉一行「总计」（跨订阅含未归属求和，不参与 ↑↓ 选择）。
- *     周期：today/24h/7d/30d 固定四档 + 额度窗口（GLM/Kimi/OpenCode Go/MiniMax/Command Code 的实时额度接口
- *     会带回窗口长度与重置时刻，面板用 resetAt - spanMs 对齐到 provider 的真实窗口边界，
- *     无接口时可用 subscriptions[].quotaWindows 手工声明）。对齐窗口在明细表里带 ⟲ 标记；
- *     默认热力图周期会跳过「窗口内 0 事件」的窗口，真空时给「无用量」提示而不是一片 ·。
- *     扫描结果按文件 mtime+size 增量缓存到 ~/.pi/agent/.statusbar-subs-cache.json；
- *     热启动 ~10ms，首次全量约 0.5s（133MB/137 文件），每 8 个文件让出一次事件循环不卡 TUI。
- *     数据回填：打开即先渲染「扫描中…」，额度（最多等 SUBS_QUOTA_WAIT_MS）与扫描到位后
- *       回填重绘；r 键强制重扫（绕过缓存）。
- *     高度：终端高度的 85% 上下（与 overlayOptions.maxHeight 对应）；内容按
- *       列表 → 热力图 → 明细 的优先级装不下就降级，不放「静默截断」。
- *     顺带：subs widget 可见时**不把 widget 容器搬进 split 右栏**（右栏默认 32 列，
- *     放不下约 110 列的表格）；关掉后自动恢复入栏。
- *     配置见 subscriptions[]（~/.pi/agent/statusbar.json）；**零配置可用**：
- *       没配的 provider 会自动成行，subscriptions[] 只用来补名字/套餐/账期/额度窗口，
- *       或把多个 provider 归并成一条订阅（额度接口也能直接认出来，见 quotaWindowsFor）。
- *       subscriptions: [{ id, name, plan?, priceMonthly?, startDate?, expireAt?, autoRenew?,
- *                         status?, billingType?, providerFilter?[], modelFilter?[],
- *                         quotaWindows?: [{ key, spanMs }] }]
- *     providerFilter 按 provider id 精确/子串匹配，modelFilter 按模型名子串匹配（`/re/` 形式按正则）；
- *     两者都缺省的条目永不自动归属（避免一个空过滤器吃掉全部用量）。
- *     autoDiscoverSubs（默认 true）：false = 关掉自动成行，未命中的用量一律进「未归属」。
  * - /exit 为 /quit 的别名，优雅退出 pi
  * - 窄终端先按 扩展状态 → 额度/token → 模型 的顺序收起，仍放不下则整段换行成多行（分支与上下文永不丢弃）
  * - 布局可配置（layout）：bottom 底部单行 / right 右侧浮层（浮在聊天上）/ auto 自动右侧浮层（默认）
@@ -136,12 +99,7 @@ import {
 	type TUI,
 } from "@earendil-works/pi-tui";
 import { readFileSync, writeFileSync } from "node:fs";
-import {
-	mkdirSync,
-	readdirSync,
-	renameSync,
-	statSync,
-} from "node:fs";
+import { mkdirSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
@@ -165,18 +123,10 @@ interface Segment {
 	key?: MetricKey;
 }
 
-/** 额度源单个窗口的渲染文本（面板逐窗口分行，底部用 · 连接成一行）。
- *  label/spanMs/resetAt 是「结构化」的窗口元信息，供订阅统计把本地 token 用量
- *  对齐到 provider 的真实额度窗口（见 /statusbar subs）；纯展示路径不读这三个字段。 */
+/** 额度源单个窗口的渲染文本（面板逐窗口分行，底部用 · 连接成一行） */
 interface QuotaRow {
 	text: string;
 	percent?: number;
-	/** 窗口短标签（"5h"/"周"/"月"…），与 subscriptions[].quotaWindows[].key 对应 */
-	label?: string;
-	/** 窗口长度（ms） */
-	spanMs?: number;
-	/** 本窗口重置时刻（epoch ms）；窗口起点 = resetAt - spanMs */
-	resetAt?: number;
 }
 
 /** 额度源渲染出的短文本与最大占用百分比（决定颜色）；rows 有值时右侧面板逐窗口分行展示 */
@@ -191,6 +141,8 @@ interface QuotaSource {
 	id: string;
 	match: RegExp;
 	ttlMs: number;
+	/** 少数额度接口需要不同于推理端的凭据（如 Copilot 的 GitHub OAuth token） */
+	resolveApiKey?(ctx: ExtensionContext, providerId: string): Promise<string | undefined>;
 	fetch(
 		origin: string,
 		apiKey: string,
@@ -243,11 +195,6 @@ interface StatusbarConfig {
 	hiddenMetrics: MetricKey[];
 	/** 配置面板显示语言，默认 zh；/statusbar 菜单语言行 ←→ 切换（即时写回配置文件） */
 	language: Lang;
-	/** 订阅列表（/statusbar subs 面板的统计口径）；缺省空数组 = 面板只显示「未归属」汇总 */
-	subscriptions: SubscriptionConfig[];
-	/** 未被 subscriptions[] 命中的 provider 是否自动成行（默认 true）。
-	 *  行名就是 provider id；false = 未命中的用量一律进「未归属」 */
-	autoDiscoverSubs: boolean;
 }
 
 /** 配置面板语言 */
@@ -262,37 +209,6 @@ type Lang = "zh" | "en";
  *  terminal.integrated.gpuAcceleration 从 "off"（DOM 渲染器）改回 "auto"/"on"（WebGL）；
  *  详见 README 的「排障」一节。 */
 type PanelBorder = "auto" | "unicode" | "ascii";
-
-/** 订阅额度窗口（显式配置）：key 为展示标签（如 "5h"/"周"/"月"），spanMs 为窗口长度。
- *  一般不需要配：GLM/Kimi/OpenCode Go/MiniMax/Command Code 的实时额度接口会带回窗口长度与重置时刻，
- *  面板会直接用它们对齐；本字段用于接口不可得、或想要额外自定义窗口的订阅。 */
-interface QuotaWindowConfig {
-	key: string;
-	spanMs: number;
-}
-
-/** 一条订阅（/statusbar subs 面板的统计口径输入）。
- *  归属规则：providerFilter / modelFilter 命中即归属本订阅；多个订阅同时命中时按配置顺序
- *  取第一个（先到先得）。两者都缺省 = 永不自动归属，避免一个空过滤器把全部用量吃掉。 */
-interface SubscriptionConfig {
-	id: string;
-	name: string;
-	plan?: string;
-	/** 月费（USD） */
-	priceMonthly?: number;
-	startDate?: string;
-	expireAt?: string;
-	autoRenew?: boolean;
-	status?: "active" | "historical" | "paused";
-	billingType?: "subscription" | "prepaid";
-	/** 命中的 provider id（精确或子串，大小写不敏感），优先级高于 modelFilter。
-	 *  例：["cc-switch-zhipu-glm"] */
-	providerFilter?: string[];
-	/** 命中的模型名（子串，大小写不敏感；写成 `/re/` 形式则按正则）。
-	 *  例：["glm"] 可覆盖 glm-5.3 / glm-5.3-flash */
-	modelFilter?: string[];
-	quotaWindows?: QuotaWindowConfig[];
-}
 
 /** 可配置显隐的指标 */
 type MetricKey =
@@ -382,30 +298,6 @@ const UI_TEXT = {
 			"自动写入 pi settings.json 失败，请手动在 /settings → TUI mode 里切到 fullscreen",
 		splitUnavailable:
 			"分栏需要 fullscreen 模式（/settings → TUI mode）与支持 HStack 的 pi-tui",
-		rowSubs: "订阅统计",
-		subsTitle: "订阅用量统计",
-		subsUnattributed: "未归属",
-		subsTotal: "总计",
-		subsLoading: "扫描会话日志…",
-		subsNoConfig:
-			"没有可统计的订阅：扫 pi 会话日志未发现用量（也可在 statusbar.json 的 subscriptions[] 手工声明订阅，以带上套餐/账期/额度窗口）",
-		subsNoEvents: "该订阅未命中任何 pi 会话用量",
-		subsHint: "↑↓/jk 切订阅 · ←→ 切周期 · h 切指标 · r 重扫 · Esc/q 关闭",
-		subsDetail: "明细",
-		subsHeatmap: "热力图",
-		subsTokens: "Tokens",
-		subsCost: "费用",
-		subsQuotaUsed: "额度已用",
-		subsHeaderName: "订阅",
-		subsScanning: (files: number, events: number, parsed: number) =>
-			`扫描 ${files} 文件 · ${events} 条事件${parsed ? ` · 本次重解 ${parsed}` : " · 全部命中缓存"}`,
-		subsScanFailed: (e: unknown) => `扫描失败: ${e}`,
-		subsHeatEmpty: "该窗口没有用量（←→ 换个周期）",
-		subsDaily: "近 30 天",
-		subsDailyTotal: (total: string, peak: string) =>
-			`共 ${total} · 峰值 ${peak}/天`,
-		subsPeakPerDay: (peak: string) => `峰值 ${peak}/天`,
-		subsTooNarrow: "终端太窄，拉宽一点再看订阅统计（Esc 关闭）",
 	},
 	en: {
 		menuTitle: "Statusbar Settings",
@@ -440,30 +332,6 @@ const UI_TEXT = {
 			"Could not write pi settings.json; switch manually via /settings → TUI mode → fullscreen",
 		splitUnavailable:
 			"Right column needs fullscreen mode (/settings → TUI mode) and a pi-tui build that exports HStack",
-		rowSubs: "Subscriptions",
-		subsTitle: "Subscription usage",
-		subsUnattributed: "Unattributed",
-		subsTotal: "Total",
-		subsLoading: "Scanning session logs…",
-		subsNoConfig:
-			"Nothing to show: no usage found in pi session logs (or declare subscriptions[] in statusbar.json to add plan/billing/quota-window info)",
-		subsNoEvents: "No pi session usage matched this subscription",
-		subsHint: "↑↓/jk subs · ←→ range · h metric · r rescan · Esc/q close",
-		subsDetail: "Detail",
-		subsHeatmap: "Heatmap",
-		subsTokens: "Tokens",
-		subsCost: "Cost",
-		subsQuotaUsed: "Quota used",
-		subsHeaderName: "Subscription",
-		subsScanning: (files: number, events: number, parsed: number) =>
-			`${files} files · ${events} events${parsed ? ` · ${parsed} re-parsed` : " · all cached"}`,
-		subsScanFailed: (e: unknown) => `Scan failed: ${e}`,
-		subsHeatEmpty: "No usage in this window (←→ for another range)",
-		subsDaily: "Last 30 days",
-		subsDailyTotal: (total: string, peak: string) =>
-			`${total} total · peak ${peak}/day`,
-		subsPeakPerDay: (peak: string) => `peak ${peak}/day`,
-		subsTooNarrow: "Terminal too narrow for the subscription panel (Esc closes)",
 	},
 } as const;
 
@@ -530,78 +398,6 @@ function toRightWidth(v: unknown): number {
 
 function toLang(v: unknown): Lang {
 	return v === "en" ? "en" : "zh";
-}
-
-function toStringArray(v: unknown): string[] | undefined {
-	if (!Array.isArray(v)) return undefined;
-	const out = v.filter(
-		(x): x is string => typeof x === "string" && x.trim().length > 0,
-	);
-	return out.length ? out : undefined;
-}
-
-/** billingType 合法值收窄："prepaid" | "subscription"，其余/缺省 → undefined */
-function toBillingType(v: unknown): SubscriptionConfig["billingType"] {
-	if (v === "prepaid") return "prepaid";
-	if (v === "subscription") return "subscription";
-	return undefined;
-}
-
-/**
- * 解析 subscriptions 配置：逐条校验，非法条目静默跳过（配置错一条不该让整份配置回落默认值）。
- *  name 必填（面板要靠它区分）；id 缺省自动生成；数组字段过滤非字符串项。
- */
-function toSubscriptions(v: unknown): SubscriptionConfig[] {
-	if (!Array.isArray(v)) return [];
-	const out: SubscriptionConfig[] = [];
-	v.forEach((raw, i) => {
-		if (!raw || typeof raw !== "object") return;
-		const r = raw as Record<string, unknown>;
-		const name =
-			typeof r.name === "string" && r.name.trim() ? r.name.trim() : null;
-		if (!name) return;
-		const quotaWindows: QuotaWindowConfig[] = [];
-		if (Array.isArray(r.quotaWindows)) {
-			for (const w of r.quotaWindows) {
-				if (!w || typeof w !== "object") continue;
-				const wr = w as Record<string, unknown>;
-				const key = typeof wr.key === "string" ? wr.key.trim() : "";
-				const spanMs =
-					typeof wr.spanMs === "number" &&
-					Number.isFinite(wr.spanMs) &&
-					wr.spanMs > 0
-						? wr.spanMs
-						: undefined;
-				if (key && spanMs) quotaWindows.push({ key, spanMs });
-			}
-		}
-		out.push({
-			id:
-				typeof r.id === "string" && r.id.trim()
-					? r.id.trim()
-					: `sub-${i + 1}`,
-			name,
-			plan: typeof r.plan === "string" ? r.plan : undefined,
-			priceMonthly:
-				typeof r.priceMonthly === "number" && Number.isFinite(r.priceMonthly)
-					? r.priceMonthly
-					: undefined,
-			startDate: typeof r.startDate === "string" ? r.startDate : undefined,
-			expireAt: typeof r.expireAt === "string" ? r.expireAt : undefined,
-			autoRenew: typeof r.autoRenew === "boolean" ? r.autoRenew : undefined,
-			status:
-				r.status === "active" ||
-				r.status === "historical" ||
-				r.status === "paused"
-					? r.status
-					: undefined,
-			billingType: toBillingType(r.billingType),
-			providerFilter: toStringArray(r.providerFilter),
-			modelFilter: toStringArray(r.modelFilter),
-			quotaWindows: quotaWindows.length ? quotaWindows : undefined,
-		});
-	});
-	return out;
 }
 
 function toPanelBorder(v: unknown): PanelBorder {
@@ -671,8 +467,6 @@ function loadConfig(): StatusbarConfig {
 				typeof raw?.tuiModeBackup === "string" ? raw.tuiModeBackup : undefined,
 			hiddenMetrics: toMetricKeys(raw?.hiddenMetrics),
 			language: toLang(raw?.language),
-			subscriptions: toSubscriptions(raw?.subscriptions),
-			autoDiscoverSubs: raw?.autoDiscoverSubs !== false,
 		};
 	} catch {
 		return {
@@ -687,8 +481,6 @@ function loadConfig(): StatusbarConfig {
 			tuiModeBackup: undefined,
 			hiddenMetrics: [],
 			language: "zh",
-			subscriptions: [],
-			autoDiscoverSubs: true,
 		};
 	}
 }
@@ -712,8 +504,6 @@ function saveConfigPatch(patch: Record<string, unknown>): void {
 			tuiModeBackup: config.tuiModeBackup,
 			hiddenMetrics: config.hiddenMetrics,
 			language: config.language,
-			subscriptions: config.subscriptions,
-			autoDiscoverSubs: config.autoDiscoverSubs,
 		};
 	}
 	Object.assign(raw, patch);
@@ -888,32 +678,6 @@ function glmWindowLabel(unit: number, num: number): string {
 	return `u${unit}:${num}`;
 }
 
-/** GLM 窗口长度（ms）：unit=3 小时 / 6 周 / 5 月（按 30 天）/ 4 天；未知单位返回 undefined */
-function glmWindowSpanMs(unit: number, num: number): number | undefined {
-	const H = 3600_000;
-	if (unit === 3) return num * H;
-	if (unit === 4) return num * 24 * H;
-	if (unit === 6) return num * 7 * 24 * H;
-	if (unit === 5) return num * 30 * 24 * H;
-	return undefined;
-}
-
-/** 窗口短标签 → 窗口长度（ms）："5h" / "7天" / "周" / "月"…；不认识返回 undefined。
- *  接口直接给了窗口时长时优先用接口值，本函数是缺省推导（如 Kimi usages 的月付键）。 */
-function labelToSpanMs(label: string): number | undefined {
-	const H = 3600_000;
-	const D = 24 * H;
-	const h = /^(\d+)h$/.exec(label);
-	if (h) return parseInt(h[1], 10) * H;
-	const d = /^(\d+)天$/.exec(label);
-	if (d) return parseInt(d[1], 10) * D;
-	const w = /^(\d+)周$/.exec(label);
-	if (w) return parseInt(w[1], 10) * 7 * D;
-	if (label === "周") return 7 * D;
-	if (label === "月" || label === "月编程") return 30 * D;
-	return undefined;
-}
-
 /** Kimi usages 对象的窗口 key → 展示标签；不认识返回 null（月付套餐有 limit_month_total/limit_month_code） */
 function kimiUsageLabel(key: string): string | null {
 	if (key === "limit_month_total") return "月";
@@ -931,8 +695,223 @@ function kimiUsageLabel(key: string): string | null {
 
 const FETCH_TIMEOUT_MS = 8000;
 
-/** 内置额度源（各家认证方式实测确认） */
+/** 新额度接口只读 GET；拒绝重定向，错误只保留状态码，不反射响应正文或凭据。 */
+async function fetchQuotaJson(url: string, headers: Record<string, string>): Promise<any> {
+	const res = await fetch(url, {
+		headers: { Accept: "application/json", "User-Agent": "pi-statusbar", ...headers },
+		redirect: "error",
+		signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+	});
+	if (!res.ok) throw new Error(`HTTP ${res.status}`);
+	return res.json();
+}
+
+function finiteNumber(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+/** 只读 Pi 当前凭据；旧版没有公开 getter 时按 Pi agentDir 约定回退，不自行刷新或写 auth.json。 */
+function storedOAuth(providerId: string): Record<string, unknown> | undefined {
+	try {
+		const credential = typeof piAgentRuntime.readStoredCredential === "function"
+			? piAgentRuntime.readStoredCredential(providerId)
+			: JSON.parse(readFileSync(join(
+				typeof piAgentRuntime.getAgentDir === "function" ? piAgentRuntime.getAgentDir()
+					: process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent"),
+				"auth.json",
+			), "utf8"))[providerId];
+		return credential?.type === "oauth" ? credential : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Codex OAuth JWT 的账户 header；只接受 header-safe 字符，不输出或保存 JWT/账户 ID。 */
+function codexAccountId(token: string): string | undefined {
+	try {
+		const claims = JSON.parse(Buffer.from(token.split(".")[1] ?? "", "base64url").toString("utf8"));
+		const id = claims?.["https://api.openai.com/auth"]?.chatgpt_account_id;
+		return typeof id === "string" && /^[\x21-\x7e]{1,256}$/.test(id) ? id : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** 内置额度源（按 provider baseUrl 发现；额度认证与推理认证不一定相同） */
 const QUOTA_SOURCES: QuotaSource[] = [
+	{
+		id: "Codex",
+		match: /^https:\/\/chatgpt\.com(?:\/|$)/,
+		ttlMs: 5 * 60_000,
+		async fetch(_origin, apiKey) {
+			const headers: Record<string, string> = { Authorization: `Bearer ${apiKey}` };
+			const accountId = codexAccountId(apiKey);
+			if (accountId) headers["ChatGPT-Account-Id"] = accountId;
+			const json = await fetchQuotaJson("https://chatgpt.com/backend-api/wham/usage", headers);
+			const rows: QuotaRow[] = [];
+			const details: string[] = [];
+			for (const [window, fallback] of [
+				[json?.rate_limit?.primary_window, "5h"],
+				[json?.rate_limit?.secondary_window, "周"],
+			] as const) {
+				const pct = finiteNumber(window?.used_percent);
+				if (pct == null || pct < 0 || pct > 100) continue;
+				const seconds = finiteNumber(window?.limit_window_seconds);
+				const label = seconds === 604800 ? "周" : seconds && seconds > 0
+					? seconds % 86400 === 0 ? `${seconds / 86400}天` : `${Math.round(seconds / 3600)}h`
+					: fallback;
+				const reset = finiteNumber(window?.reset_at);
+				const after = finiteNumber(window?.reset_after_seconds);
+				const at = reset && reset > 0 ? reset * 1000
+					: after != null && after >= 0 ? Date.now() + after * 1000 : undefined;
+				rows.push({ text: withReset(`${label} ${Math.round(pct)}%`, at), percent: pct });
+				details.push(`${label} 窗口: 已用 ${Math.round(pct)}%${resetDetail(at)}`);
+			}
+			if (!rows.length) return { seg: null, detail: "Codex 响应中无可用额度窗口" };
+			return {
+				seg: { text: `Codex ${rows.map((r) => r.text).join("·")}`, rows, maxPercent: Math.max(...rows.map((r) => r.percent!)) },
+				detail: `Codex\n  ${details.join("\n  ")}`,
+			};
+		},
+	},
+	{
+		id: "Copilot",
+		match: /^https:\/\/(?:api(?:\.[a-z0-9-]+)?\.githubcopilot\.com|copilot-api\.github\.com)(?:\/|$)/,
+		ttlMs: 5 * 60_000,
+		async resolveApiKey(ctx, providerId) {
+			// 先由 Pi 完成正常的 OAuth 刷新，再只读最新凭据。access 是推理 proxy token，
+			// refresh 才是 GitHub access token；不能把前者发给 api.github.com 的额度接口。
+			const resolved = await ctx.modelRegistry.getApiKeyForProvider(providerId);
+			if (!resolved) return undefined;
+			const credential = storedOAuth(providerId);
+			if (credential) {
+				if (credential.enterpriseUrl && credential.enterpriseUrl !== "github.com")
+					throw new Error("Copilot Enterprise 额度暂不支持，请在企业控制台查看");
+				return typeof credential.refresh === "string" ? credential.refresh : undefined;
+			}
+			if (resolved.includes("proxy-ep=")) throw new Error("无法读取 Copilot 的 GitHub OAuth 凭据，请重新登录");
+			return resolved;
+		},
+		async fetch(_origin, apiKey) {
+			const json = await fetchQuotaJson("https://api.github.com/copilot_internal/user", {
+				Authorization: `Bearer ${apiKey}`,
+				"Editor-Version": "vscode/1.107.0",
+				"Editor-Plugin-Version": "copilot-chat/0.35.0",
+				"X-GitHub-Api-Version": "2026-06-01",
+			});
+			const at = toResetAt(json?.quota_reset_date);
+			const rows: QuotaRow[] = [];
+			for (const [key, label] of [["premium_interactions", "高级"], ["chat", "聊天"], ["completions", "补全"]]) {
+				const quota = json?.quota_snapshots?.[key];
+				if (quota?.unlimited === true) {
+					rows.push({ text: `${label} ∞` });
+					continue;
+				}
+				const remainingPct = finiteNumber(quota?.percent_remaining);
+				const limit = finiteNumber(quota?.entitlement);
+				const remaining = finiteNumber(quota?.remaining);
+				const pct = remainingPct != null && remainingPct >= 0 && remainingPct <= 100
+					? 100 - remainingPct : limit != null && limit > 0 && remaining != null && remaining >= 0 && remaining <= limit
+						? (1 - remaining / limit) * 100 : undefined;
+				if (pct == null) continue;
+				rows.push({ text: withReset(`${label} ${Math.round(pct)}%`, at), percent: pct });
+			}
+			if (!rows.length) return { seg: null, detail: "Copilot 响应中无可用 quota_snapshots" };
+			const percentages = rows.flatMap((r) => r.percent == null ? [] : [r.percent]);
+			return {
+				seg: { text: `Copilot ${rows.map((r) => r.text).join("·")}`, rows,
+					maxPercent: percentages.length ? Math.max(...percentages) : undefined },
+				detail: `Copilot\n  ${rows.map((r) => r.text).join("\n  ")}${resetDetail(at)}`,
+			};
+		},
+	},
+	{
+		id: "xAI",
+		match: /^https:\/\/(?:api\.x\.ai|cli-chat-proxy\.grok\.com)(?:\/|$)/,
+		ttlMs: 5 * 60_000,
+		async resolveApiKey(ctx, providerId) {
+			const registry = ctx.modelRegistry;
+			if (typeof registry.getProviderAuth === "function") {
+				const resolved = await registry.getProviderAuth(providerId);
+				if (!resolved?.auth.apiKey) return undefined;
+				if (resolved.source !== "OAuth") throw new Error("xAI 额度需要 Pi OAuth 登录；API key 余额暂不支持");
+				return resolved.auth.apiKey;
+			}
+			const apiKey = await registry.getApiKeyForProvider(providerId);
+			if (!apiKey) return undefined;
+			if (!storedOAuth(providerId)) throw new Error("xAI 额度需要 Pi OAuth 登录；API key 余额暂不支持");
+			return apiKey;
+		},
+		async fetch(_origin, apiKey) {
+			const headers: Record<string, string> = {
+				Authorization: `Bearer ${apiKey}`,
+				"X-XAI-Token-Auth": "xai-grok-cli",
+				"x-grok-client-identifier": "pi-statusbar",
+			};
+			// 仅从本次认证 /user 的返回取 transient ID，不用 JWT、用户配置或持久化身份。
+			const user = await fetchQuotaJson("https://cli-chat-proxy.grok.com/v1/user", headers);
+			if (typeof user?.userId !== "string" || !/^[\x21-\x7e]{1,256}$/.test(user.userId))
+				throw new Error("无法确认 xAI 账户身份，未查询账单");
+			const json = await fetchQuotaJson("https://cli-chat-proxy.grok.com/v1/billing?format=credits", {
+				...headers, "x-userid": user.userId,
+			});
+			const config = json?.config ?? json;
+			// 官方账单金额以 cents 返回，protobuf 包装值形如 { val: number }。
+			const cents = (value: any): number | undefined => {
+				const n = finiteNumber(value?.val ?? value);
+				return n != null && n >= 0 && n <= Number.MAX_SAFE_INTEGER ? n : undefined;
+			};
+			const limit = cents(config?.monthlyLimit);
+			const used = cents(config?.used);
+			const creditPct = finiteNumber(config?.creditUsagePercent);
+			const pct = creditPct != null && creditPct >= 0 && creditPct <= 100 ? creditPct
+				: limit != null && limit > 0 && used != null ? Math.min(100, used / limit * 100) : undefined;
+			const at = toResetAt(config?.currentPeriod?.end ?? config?.billingPeriodEnd);
+			const rows: QuotaRow[] = [];
+			const details: string[] = [];
+			if (pct != null) {
+				const label = config?.currentPeriod?.type === "WEEKLY" ? "周" : config?.currentPeriod?.type === "MONTHLY" ? "月" : "额度";
+				rows.push({ text: withReset(`${label} ${Math.round(pct)}%`, at), percent: pct });
+				details.push(`订阅已用 ${Math.round(pct)}%${resetDetail(at)}`);
+			}
+			const demandCap = cents(config?.onDemandCap);
+			const demandUsed = cents(config?.onDemandUsed);
+			if (demandUsed != null) {
+				const demandPct = demandCap != null && demandCap > 0 ? Math.min(100, demandUsed / demandCap * 100) : undefined;
+				rows.push({ text: demandPct == null ? `按量 $${(demandUsed / 100).toFixed(1)}` : `按量 ${Math.round(demandPct)}%`, percent: demandPct });
+				details.push(`按量已用 $${(demandUsed / 100).toFixed(2)}${demandCap != null ? ` / 上限 $${(demandCap / 100).toFixed(2)}` : ""}`);
+			}
+			const prepaid = cents(config?.prepaidBalance);
+			if (prepaid != null) {
+				rows.push({ text: `余$${(prepaid / 100).toFixed(1)}` });
+				details.push(`预付余额 $${(prepaid / 100).toFixed(2)}`);
+			}
+			if (!rows.length) return { seg: null, detail: "xAI 响应中无可用账单额度或余额" };
+			const percentages = rows.flatMap((r) => r.percent == null ? [] : [r.percent]);
+			return {
+				seg: { text: `xAI ${rows.map((r) => r.text).join("·")}`, rows,
+					maxPercent: percentages.length ? Math.max(...percentages) : undefined },
+				detail: `xAI\n  ${details.join("\n  ")}`,
+			};
+		},
+	},
+	{
+		id: "Radius",
+		match: /^https:\/\/radius\.pi\.dev(?:\/|$)/,
+		ttlMs: 5 * 60_000,
+		async fetch(_origin, apiKey) {
+			// 官方 live accounting 接口，不把预算总额、reserved 或历史充值当作可用余额。
+			const json = await fetchQuotaJson("https://radius.pi.dev/v1/billing", { Authorization: `Bearer ${apiKey}` });
+			const available = finiteNumber(json?.balance?.available);
+			if (json?.ok !== true || json?.currency !== "USD" || available == null)
+				return { seg: null, detail: "Radius 响应中无可用 USD 余额（可能缺少账单权限）" };
+			const charged = finiteNumber(json?.current_period?.actual_charged);
+			return {
+				seg: { text: `Radius $${available.toFixed(1)}` },
+				detail: `Radius 组织可用余额 $${available.toFixed(2)}${charged != null ? `；本月实际扣费 $${charged.toFixed(2)}` : ""}`,
+			};
+		},
+	},
 	{
 		id: "Kimi",
 		match: /api\.kimi\.com/,
@@ -979,9 +958,6 @@ const QUOTA_SOURCES: QuotaSource[] = [
 				rows.push({
 					text,
 					percent: pct,
-					label,
-					spanMs: Math.round(hours * 3600_000) || labelToSpanMs(label),
-					resetAt: at,
 				});
 				maxPercent = Math.max(maxPercent ?? 0, pct);
 				shownLabels.add(label);
@@ -996,9 +972,6 @@ const QUOTA_SOURCES: QuotaSource[] = [
 				rows.push({
 					text,
 					percent: pct,
-					label: "周",
-					spanMs: 7 * 24 * 3600_000,
-					resetAt: at,
 				});
 				maxPercent = Math.max(maxPercent ?? 0, pct);
 				shownLabels.add("周");
@@ -1019,9 +992,6 @@ const QUOTA_SOURCES: QuotaSource[] = [
 				rows.push({
 					text,
 					percent: pct,
-					label,
-					spanMs: labelToSpanMs(label),
-					resetAt: at,
 				});
 				maxPercent = Math.max(maxPercent ?? 0, pct);
 				shownLabels.add(label);
@@ -1076,9 +1046,6 @@ const QUOTA_SOURCES: QuotaSource[] = [
 				rows.push({
 					text,
 					percent: l.percentage,
-					label,
-					spanMs: glmWindowSpanMs(l.unit ?? 0, l.number ?? 1),
-					resetAt: at,
 				});
 			}
 			const maxPercent = Math.max(...windows.map((l) => l.percentage));
@@ -1191,9 +1158,6 @@ const QUOTA_SOURCES: QuotaSource[] = [
 				rows.push({
 					text,
 					percent: pct,
-					label,
-					spanMs: labelToSpanMs(label),
-					resetAt: at,
 				});
 				maxPercent = Math.max(maxPercent ?? 0, pct);
 			}
@@ -1262,9 +1226,6 @@ const QUOTA_SOURCES: QuotaSource[] = [
 				rows.push({
 					text,
 					percent: pct,
-					label,
-					spanMs: labelToSpanMs(label),
-					resetAt: at,
 				});
 				maxPercent = Math.max(maxPercent ?? 0, pct);
 				detail += `\n  ${label} 窗口: 剩余 ${Math.round(remain)}%${resetDetail(at)}`;
@@ -1419,11 +1380,11 @@ const QUOTA_SOURCES: QuotaSource[] = [
 			let maxPercent: number | undefined;
 			const detailAdds: string[] = [];
 			// 5h/周窗口：used/cap 为 credits，占比 = used/cap
-			const WINDOWS: [string, string, number][] = [
-				["fiveHour", "5h", 5 * 3600_000],
-				["weekly", "周", 7 * 24 * 3600_000],
+			const WINDOWS: [string, string][] = [
+				["fiveHour", "5h"],
+				["weekly", "周"],
 			];
-			for (const [key, label, spanMs] of WINDOWS) {
+			for (const [key, label] of WINDOWS) {
 				const w = creditsRaw?.windowLimits?.[key];
 				const used = typeof w?.used === "number" ? w.used : undefined;
 				const cap = typeof w?.cap === "number" ? w.cap : undefined;
@@ -1433,7 +1394,7 @@ const QUOTA_SOURCES: QuotaSource[] = [
 				const at = toResetMs(w?.resetAt);
 				const text = withReset(`${label} ${Math.round(pct)}%`, at);
 				parts.push(text);
-				rows.push({ text, percent: pct, label, spanMs, resetAt: at });
+				rows.push({ text, percent: pct });
 				maxPercent = Math.max(maxPercent ?? 0, pct);
 				detailAdds.push(
 					`  ${label} 窗口: ${used.toFixed(2)}/${cap.toFixed(2)} credits（${Math.round(pct)}%）${resetDetail(at)}`,
@@ -1450,7 +1411,6 @@ const QUOTA_SOURCES: QuotaSource[] = [
 			if (c) parts.push(`余$${remaining.toFixed(1)}`);
 			// 右侧浮层（panel 变体）只渲染 rows 逐行输出，seg.text 整段被丢弃：
 			// 余额必须自己占一行，否则面板只会显示窗口、看不到余额。
-			// 无 spanMs 的行会被订阅统计的窗口对齐（liveQuotaWindows）自动跳过
 			if (c) rows.push({ text: `余$${remaining.toFixed(1)}` });
 
 			const sub = subRaw?.data;
@@ -1499,584 +1459,14 @@ const QUOTA_SOURCES: QuotaSource[] = [
 	},
 ];
 
-// ---------- 订阅统计（/statusbar subs）：会话日志扫描 → 归属 → 窗口聚合 → 热力图 ----------
-//
-// 为什么是「本地扫描 + 本地折算」而不是直接读 ai-sub-dashboard：pi-statusbar 是纯扩展，
-// 不该强依赖另一个进程在跑。
-// 口径（与 ai-sub-dashboard 的 server/collectors/pi.js 对齐）：
-//   - 只认 `type === "message"` 且 `message.role === "assistant"` 且带 usage 的行；
-//     同目录下的 subagent-artifacts/*.jsonl 是 recordType 结构，天然被排除，不会重复计数
-//   - 按消息 id 跨文件去重：pi 的 /tree fork 会把历史消息整段复制进新 session，
-//     实测 137 个文件里去重前后差约 10%
-// 费用口径：用本扩展已有的 priceTable（models.dev 24h 缓存 + models.json 运行时单价）
-// 逐条计价，与 footer 的实时花费同一套 calcCost；查不到单价时回落 pi 自己算的
-// usage.cost.total（实测 ~97.3% 消息能命中 priceTable，未命中的 2.7% 走回落）。
-// 缓存：按「文件 mtime + size」增量，落盘 ~/.pi/agent/.statusbar-subs-cache.json；
-// 未变动的文件直接复用上次解析结果，所以常态打开面板只 stat 一批文件、不重读 133MB。
-
-/** 会话日志根目录（PI_STATUSBAR_SESSIONS_DIR 可覆盖，便于用固定样本做验证） */
-const SESSIONS_DIR =
-	process.env.PI_STATUSBAR_SESSIONS_DIR ||
-	join(homedir(), ".pi", "agent", "sessions");
-const SUBS_CACHE_FILE = join(
-	homedir(),
-	".pi",
-	"agent",
-	".statusbar-subs-cache.json",
-);
-/** 扫描结果缓存 TTL：TTL 内重复打开面板不重新 stat */
-const SUBS_TTL_MS = 60_000;
-/** 打开面板时等实时额度的上限（ms）：额度窗口要对齐就得先有 resetAt，
- *  但不能为它无限等——离线/接口慢时面板就打不开了；超时先出滚动窗口 */
-const SUBS_QUOTA_WAIT_MS = 3000;
-/** 磁盘缓存格式版本：不匹配则整份丢弃重扫 */
-const SUBS_CACHE_VERSION = 1;
-const HOUR_MS = 3600_000;
-const DAY_MS = 24 * HOUR_MS;
-
-/** 会话日志里的一条 assistant 用量。字段名压到 1-2 字符：量级 1.4 万条且要落盘缓存 */
-interface SubEvent {
-	/** 消息时间戳（epoch ms） */
-	t: number;
-	/** 消息 id，跨文件去重用；空字符串 = 该行没有 id（无法去重） */
-	id: string;
-	/** provider id（如 cc-switch-zhipu-glm） */
-	p: string;
-	/** 模型名（原样保留，不做归一：单价表就是按 provider:model 取的） */
-	m: string;
-	i: number;
-	o: number;
-	cr: number;
-	cw: number;
-	/** pi 自己算的 usage.cost.total，单价表查不到时的 fallback */
-	c: number;
-}
-
-interface SubScanCache {
-	version: number;
-	files: Record<string, { m: number; s: number; ev: SubEvent[] }>;
-}
-
-/** 单条事件的等价费用计算函数（会话内注入：复用 priceTable + calcCost） */
-type CostFn = (ev: SubEvent) => number;
-
-/** 一个统计窗口 */
-interface WindowStats {
-	key: string;
-	since: number;
-	until: number;
-	tokens: number;
-	input: number;
-	output: number;
-	cacheRead: number;
-	cacheWrite: number;
-	costUSD: number;
-	requests: number;
-	/** true = 起点已对齐到 provider 的真实额度窗口（resetAt - spanMs），false = now - spanMs 滚动 */
-	aligned: boolean;
-	/** 额度接口给的该窗口已用百分比（仅对齐窗口有，用于对照） */
-	percent?: number;
-}
-
-/** 额度窗口描述（来自实时额度接口或 subscriptions[].quotaWindows） */
-interface SubWindow {
-	key: string;
-	spanMs: number;
-	/** 有值时窗口起点 = resetAt - spanMs（对齐 provider 边界）；否则 now - spanMs */
-	resetAt?: number;
-	percent?: number;
-}
-
-/** 面板固定展示的滚动周期（today 为本地当天 0 点起，其余为滚动窗口） */
-const FIXED_WINDOWS: { key: string; spanMs: number; todayOnly?: boolean }[] = [
-	{ key: "today", spanMs: 0, todayOnly: true },
-	{ key: "24h", spanMs: DAY_MS },
-	{ key: "7d", spanMs: 7 * DAY_MS },
-	{ key: "30d", spanMs: 30 * DAY_MS },
-];
-
-/** 紧凑 token 数：1.2k / 12.3m / 3.32b。
- *  单独写一个而不复用 fmtTokens：后者只到 m，十亿级会显示成 2737.54m */
-function fmtTokensShort(n: number): string {
-	if (!Number.isFinite(n) || n <= 0) return "0";
-	if (n < 1000) return `${Math.round(n)}`;
-	if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
-	if (n < 1_000_000_000) return `${(n / 1_000_000).toFixed(1)}m`;
-	return `${(n / 1_000_000_000).toFixed(2)}b`;
-}
-
-/** 宽紧两档费用：面板列窄时用紧凑档（省掉 $0 的第三位小数） */
-function fmtCostShort(n: number): string {
-	if (!Number.isFinite(n) || n <= 0) return "$0";
-	if (n >= 100) return `$${Math.round(n)}`;
-	return n >= 1 ? `$${n.toFixed(1)}` : `$${n.toFixed(2)}`;
-}
-
-function toNum(v: unknown): number {
-	const n = typeof v === "number" ? v : parseFloat(String(v));
-	return Number.isFinite(n) && n > 0 ? n : 0;
-}
-
-/** 本地当天 0 点（面板按用户本地时区展示，不使用 UTC） */
-function startOfTodayLocal(now: number): number {
-	const d = new Date(now);
-	return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-}
-
-// ---------- 扫描与缓存 ----------
-
-function walkJsonl(dir: string, out: string[] = []): string[] {
-	let entries: import("node:fs").Dirent[];
-	try {
-		entries = readdirSync(dir, { withFileTypes: true });
-	} catch {
-		return out; // 目录不存在（从未用过 pi）不算错误
-	}
-	for (const e of entries) {
-		if (e.name.startsWith(".")) continue;
-		const p = join(dir, e.name);
-		if (e.isDirectory()) walkJsonl(p, out);
-		else if (e.isFile() && e.name.endsWith(".jsonl")) out.push(p);
-	}
-	return out;
-}
-
-/** 解析单个会话文件。先做字符串预筛再 JSON.parse：
- *  用户/工具结果行占多数，全量 parse 133MB 是浪费。
- *  预筛只找子串 `"assistant"`（不假设 JSON 是紧凑格式，也不要求字段顺序）：
- *  写成 `"role":"assistant"` 会在 pi 改用带空格的 JSON 时静默漏掉全部数据；
- *  误命中（工具输出里碰巧含这个词）只是多一次 JSON.parse，会被后面的 role 检查干掉。 */
-function parseSessionFile(path: string): SubEvent[] {
-	const out: SubEvent[] = [];
-	let text: string;
-	try {
-		text = readFileSync(path, "utf8");
-	} catch {
-		return out;
-	}
-	for (const line of text.split("\n")) {
-		if (!line.includes('"assistant"')) continue;
-		let d: any;
-		try {
-			d = JSON.parse(line);
-		} catch {
-			continue; // 截断/损坏行跳过，不让单个坏行毁掉整个文件
-		}
-		if (d?.type !== "message") continue;
-		const msg = d.message;
-		if (!msg || msg.role !== "assistant") continue;
-		const u = msg.usage;
-		if (!u || typeof u !== "object") continue;
-		const i = toNum(u.input);
-		const o = toNum(u.output);
-		const cr = toNum(u.cacheRead);
-		const cw = toNum(u.cacheWrite);
-		if (i <= 0 && o <= 0 && cr <= 0 && cw <= 0) continue;
-		const t = Date.parse(d.timestamp) || 0;
-		if (!t) continue;
-		out.push({
-			t,
-			id: typeof d.id === "string" ? d.id : "",
-			p: typeof msg.provider === "string" ? msg.provider : "",
-			m: typeof msg.model === "string" ? msg.model : "",
-			i,
-			o,
-			cr,
-			cw,
-			c: toNum(u.cost?.total),
-		});
-	}
-	return out;
-}
-
-function loadSubsCache(): SubScanCache {
-	try {
-		const raw = JSON.parse(readFileSync(SUBS_CACHE_FILE, "utf8"));
-		if (
-			raw?.version === SUBS_CACHE_VERSION &&
-			raw?.files &&
-			typeof raw.files === "object"
-		)
-			return raw as SubScanCache;
-	} catch {
-		// 首次使用或缓存损坏：重扫
-	}
-	return { version: SUBS_CACHE_VERSION, files: {} };
-}
-
 /** JSON 存储的原子写缝：先写临时文件再 rename，崩溃不会留半个 JSON。
- *  subs 扫描缓存 / 单价缓存共用；payload 走模板串，统一末尾换行 */
+ *  用于单价缓存；payload 走模板串，统一末尾换行 */
 function writeJsonAtomic(path: string, data: unknown): void {
 	mkdirSync(dirname(path), { recursive: true });
 	const tmp = `${path}.tmp-${process.pid}`;
 	const payload = `${JSON.stringify(data)}\n`;
 	writeFileSync(tmp, payload);
 	renameSync(tmp, path);
-}
-
-function saveSubsCache(cache: SubScanCache): void {
-	try {
-		writeJsonAtomic(SUBS_CACHE_FILE, cache);
-	} catch {
-		// 缓存写失败不影响本次结果（下次重扫而已）
-	}
-}
-
-interface ScanResult {
-	events: SubEvent[];
-	files: number;
-	/** 本次真正重新解析的文件数（0 = 全部命中缓存） */
-	parsedFiles: number;
-	scannedAt: number;
-}
-
-/**
- * 增量扫描 pi 会话日志。force=true 时忽略 mtime/size 缓存全量重解析。
- * 每 8 个文件让出一次事件循环：首次全量（133MB/137 文件）不能让 TUI 死住。
- */
-async function scanSubEvents(force: boolean): Promise<ScanResult> {
-	const cache = loadSubsCache();
-	const files = walkJsonl(SESSIONS_DIR);
-	const next: SubScanCache["files"] = {};
-	let parsedFiles = 0;
-
-	for (let idx = 0; idx < files.length; idx++) {
-		const path = files[idx];
-		let st: import("node:fs").Stats;
-		try {
-			st = statSync(path);
-		} catch {
-			continue; // 刚被删掉
-		}
-		const hit = cache.files[path];
-		if (!force && hit && hit.m === st.mtimeMs && hit.s === st.size) {
-			next[path] = hit;
-		} else {
-			next[path] = { m: st.mtimeMs, s: st.size, ev: parseSessionFile(path) };
-			parsedFiles++;
-		}
-		if (idx % 8 === 7) await new Promise((r) => setImmediate(r));
-	}
-
-	if (parsedFiles > 0 || Object.keys(next).length !== Object.keys(cache.files).length)
-		saveSubsCache({ version: SUBS_CACHE_VERSION, files: next });
-
-	// 跨文件去重 + 时间升序
-	const seen = new Set<string>();
-	const events: SubEvent[] = [];
-	for (const f of Object.values(next)) {
-		for (const ev of f.ev) {
-			if (ev.id) {
-				if (seen.has(ev.id)) continue;
-				seen.add(ev.id);
-			}
-			events.push(ev);
-		}
-	}
-	events.sort((a, b) => a.t - b.t);
-	return { events, files: files.length, parsedFiles, scannedAt: Date.now() };
-}
-
-// ---------- 归属 ----------
-
-/** 单条过滤规则匹配：`/re/` 形式按正则（大小写不敏感），否则按子串（大小写不敏感） */
-function matchOne(pattern: string, value: string): boolean {
-	if (!value) return false;
-	const p = pattern.trim();
-	if (!p) return false;
-	if (p.length > 2 && p.startsWith("/") && p.endsWith("/")) {
-		try {
-			return new RegExp(p.slice(1, -1), "i").test(value);
-		} catch {
-			return false; // 正则写错：当作不匹配，不报错打断渲染
-		}
-	}
-	return value.toLowerCase().includes(p.toLowerCase());
-}
-
-function matchAny(patterns: string[] | undefined, value: string): boolean {
-	if (!patterns?.length) return false;
-	return patterns.some((p) => matchOne(p, value));
-}
-
-/**
- * 把事件归属到订阅：providerFilter 全局优先于 modelFilter，同层按配置顺序先到先得。
- * 每条事件最多归属一个订阅（与 ai-sub-dashboard 的 attribution 层同语义）。
- *
- * autoDiscover=true 时，未被任何配置条目命中、但带 provider 的事件按 provider 分组返回
- * （discovered），供面板自动成行——这样新 provider 无需改配置就能看见；
- * false 时这些事件落进 unattributed（旧行为）。provider 为空的事件无法命名，恒进 unattributed。
- */
-function attributeEvents(
-	events: SubEvent[],
-	subs: SubscriptionConfig[],
-	autoDiscover: boolean,
-): {
-	byId: Map<string, SubEvent[]>;
-	unattributed: SubEvent[];
-	discovered: Map<string, SubEvent[]>;
-} {
-	const byId = new Map<string, SubEvent[]>();
-	for (const s of subs) byId.set(s.id, []);
-	const unattributed: SubEvent[] = [];
-	const discovered = new Map<string, SubEvent[]>();
-	for (const ev of events) {
-		let hitId: string | null = null;
-		for (const s of subs) {
-			if (matchAny(s.providerFilter, ev.p)) {
-				hitId = s.id;
-				break;
-			}
-		}
-		if (!hitId) {
-			for (const s of subs) {
-				if (matchAny(s.modelFilter, ev.m)) {
-					hitId = s.id;
-					break;
-				}
-			}
-		}
-		const bucket = hitId ? byId.get(hitId) : undefined;
-		if (bucket) {
-			bucket.push(ev);
-			continue;
-		}
-		if (autoDiscover && ev.p) {
-			const auto = discovered.get(ev.p);
-			if (auto) auto.push(ev);
-			else discovered.set(ev.p, [ev]);
-		} else {
-			unattributed.push(ev);
-		}
-	}
-	return { byId, unattributed, discovered };
-}
-
-// ---------- 窗口聚合 ----------
-
-function emptyWindow(key: string, since: number, until: number, aligned: boolean, percent?: number): WindowStats {
-	return {
-		key,
-		since,
-		until,
-		tokens: 0,
-		input: 0,
-		output: 0,
-		cacheRead: 0,
-		cacheWrite: 0,
-		costUSD: 0,
-		requests: 0,
-		aligned,
-		percent,
-	};
-}
-
-/** 汇总 [since, until] 内的事件（events 已按时间升序）。从尾部二分定位可省掉无谓扫描 */
-function sumWindow(
-	events: SubEvent[],
-	key: string,
-	since: number,
-	until: number,
-	costOf: CostFn,
-	aligned: boolean,
-	percent?: number,
-): WindowStats {
-	const w = emptyWindow(key, since, until, aligned, percent);
-	for (let idx = events.length - 1; idx >= 0; idx--) {
-		const ev = events[idx];
-		if (ev.t > until) continue;
-		if (ev.t < since) break; // 升序：再往前只会更早
-		w.input += ev.i;
-		w.output += ev.o;
-		w.cacheRead += ev.cr;
-		w.cacheWrite += ev.cw;
-		w.tokens += ev.i + ev.o + ev.cr + ev.cw;
-		w.costUSD += costOf(ev);
-		w.requests += 1;
-	}
-	return w;
-}
-
-interface SubStats {
-	sub: SubscriptionConfig;
-	events: SubEvent[];
-	lastActiveAt: number | null;
-	topProvider: string | null;
-	providers: { id: string; count: number }[];
-	models: { id: string; count: number }[];
-	/** 全期合计（受会话日志保留期限制，不代表订阅全生命周期） */
-	total: WindowStats;
-	/** 固定四档 + 额度窗口，按面板展示顺序 */
-	windows: WindowStats[];
-}
-
-function countBy<T>(items: T[], key: (x: T) => string): { id: string; count: number }[] {
-	const m = new Map<string, number>();
-	for (const it of items) {
-		const k = key(it);
-		if (!k) continue;
-		m.set(k, (m.get(k) ?? 0) + 1);
-	}
-	return [...m.entries()]
-		.map(([id, count]) => ({ id, count }))
-		.sort((a, b) => b.count - a.count);
-}
-
-/**
- * 为一个订阅组装各周期统计。quotaWindowsFor 由调用方注入（需要实时额度状态，属会话内闭包）。
- * 额度窗口与固定窗口 key 相同时以额度窗口为准（它带真实边界与已用%）。
- */
-function buildSubStats(
-	sub: SubscriptionConfig,
-	events: SubEvent[],
-	quotaWindowsFor: (sub: SubscriptionConfig, events: SubEvent[]) => SubWindow[],
-	costOf: CostFn,
-	now: number,
-): SubStats {
-	const until = now;
-	const windows: WindowStats[] = [];
-	const claimed = new Set<string>();
-
-	for (const qw of quotaWindowsFor(sub, events)) {
-		if (claimed.has(qw.key)) continue;
-		claimed.add(qw.key);
-		const since = qw.resetAt ? qw.resetAt - qw.spanMs : now - qw.spanMs;
-		windows.push(
-			sumWindow(
-				events,
-				qw.key,
-				Math.max(0, since),
-				until,
-				costOf,
-				qw.resetAt != null,
-				qw.percent,
-			),
-		);
-	}
-	for (const fw of FIXED_WINDOWS) {
-		if (claimed.has(fw.key)) continue;
-		const since = fw.todayOnly ? startOfTodayLocal(now) : now - fw.spanMs;
-		windows.push(sumWindow(events, fw.key, since, until, costOf, false));
-	}
-
-	const total = sumWindow(events, "total", 0, until, costOf, false);
-	return {
-		sub,
-		events,
-		lastActiveAt: events.length ? events[events.length - 1].t : null,
-		topProvider: countBy(events, (e) => e.p)[0]?.id ?? null,
-		providers: countBy(events, (e) => e.p),
-		models: countBy(events, (e) => e.m),
-		total,
-		windows,
-	};
-}
-
-// ---------- 热力图 ----------
-
-interface HeatCell {
-	tokens: number;
-	costUSD: number;
-	requests: number;
-}
-
-/** 7×24 网格（行 = 周日..周六，列 = 0..23 时，均为本地时区） */
-type HeatGrid = HeatCell[][];
-
-function buildHeatGrid(
-	events: SubEvent[],
-	sinceMs: number,
-	untilMs: number,
-	costOf: CostFn,
-): HeatGrid {
-	const grid: HeatGrid = Array.from({ length: 7 }, () =>
-		Array.from({ length: 24 }, () => ({ tokens: 0, costUSD: 0, requests: 0 })),
-	);
-	for (const ev of events) {
-		if (ev.t < sinceMs || ev.t > untilMs) continue;
-		const d = new Date(ev.t);
-		const cell = grid[d.getDay()][d.getHours()];
-		cell.tokens += ev.i + ev.o + ev.cr + ev.cw;
-		cell.costUSD += costOf(ev);
-		cell.requests += 1;
-	}
-	return grid;
-}
-
-/** 热力强度 0..4：用对数尺度压缩长尾（单格尖峰不会把其余格子压成全 0） */
-function heatLevel(v: number, max: number): 0 | 1 | 2 | 3 | 4 {
-	if (v <= 0 || max <= 0) return 0;
-	const r = Math.log1p(v) / Math.log1p(max);
-	if (r <= 0.02) return 0;
-	if (r <= 0.25) return 1;
-	if (r <= 0.5) return 2;
-	if (r <= 0.75) return 3;
-	return 4;
-}
-
-/** 热力字形（无色环境下靠密度也能读出分布） */
-const HEAT_GLYPHS = ["·", "░", "▒", "▓", "█"] as const;
-const HEAT_COLORS = ["dim", "dim", "success", "warning", "error"] as const;
-
-function heatGridMax(grid: HeatGrid, metric: "tokens" | "costUSD"): number {
-	let max = 0;
-	for (const row of grid)
-		for (const c of row) max = Math.max(max, metric === "tokens" ? c.tokens : c.costUSD);
-	return max;
-}
-
-// ---------- 面板可视化辅助（柱状条 / sparkline / 花费着色） ----------
-
-/** 水平比例条：v/max 占比，宽 width 列。fractional block 字符提供 1/8 列分辨率，
- *  空格补满让每列严格对齐；0 值画淡占位点而不是空白，免得「没用量」和「渲染丢了」分不出来 */
-const BAR_EIGHTHS = ["▏", "▎", "▍", "▌", "▋", "▊", "▉"] as const;
-function barLine(v: number, max: number, width: number): string {
-	if (width <= 0) return "";
-	if (!(v > 0) || !(max > 0)) return "·".repeat(width);
-	const total = Math.min(1, Math.max(0, v / max)) * width;
-	const full = Math.floor(total);
-	const eighth = Math.round((total - full) * 8); // 0..8
-	let out = "█".repeat(Math.min(full, width));
-	if (full < width && eighth > 0) out += eighth === 8 ? "█" : BAR_EIGHTHS[eighth - 1];
-	return out.padEnd(width, " ");
-}
-
-/** 按本地日分桶：近 days 天每天的 tokens（最右 = 今天） */
-function dailyBuckets(events: SubEvent[], days: number, now: number): number[] {
-	const buckets = new Array<number>(days).fill(0);
-	const dayStart = (t: number) => {
-		const d = new Date(t);
-		return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-	};
-	const today = dayStart(now);
-	for (const ev of events) {
-		const idx = days - 1 + Math.round((dayStart(ev.t) - today) / DAY_MS);
-		if (idx < 0 || idx >= days) continue;
-		buckets[idx] += ev.i + ev.o + ev.cr + ev.cw;
-	}
-	return buckets;
-}
-
-const SPARK = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"] as const;
-/** sparkline：值归一到 [0,7]；0 值画 ▁ 而不是空，「没用量」的天也要可读 */
-function sparkline(values: number[]): string {
-	const max = Math.max(0, ...values);
-	return values
-		.map((v) =>
-			SPARK[
-				v <= 0 || max <= 0 ? 0 : Math.min(7, Math.max(1, Math.round((v / max) * 7)))
-			],
-		)
-		.join("");
-}
-
-/** 花费按量级着主题色：0 淡显；≥10 黄；≥100 红（一眼看出谁在烧钱） */
-type CostTone = "dim" | "text" | "warning" | "error";
-function costTone(costUSD: number): CostTone {
-	if (!(costUSD > 0)) return "dim";
-	if (costUSD >= 100) return "error";
-	if (costUSD >= 10) return "warning";
-	return "text";
 }
 
 export default function (pi: ExtensionAPI) {
@@ -2131,9 +1521,7 @@ export default function (pi: ExtensionAPI) {
 		detail: string;
 		fetchedAt: number;
 		inflight: boolean;
-		/** 进行中的请求本身。让并发调用方能真正等到结果——
-		 *  旧版在 inflight 时直接 `return`，调用方 await 到 undefined（等于没等），
-		 *  /statusbar subs 首屏就会因为额度还没回来而缺额度窗口（只有已暖过的 provider 才有） */
+		/** 进行中的请求本身，供并发调用方等待同一份结果 */
 		inflightTask?: Promise<void>;
 	}
 	const bindings: QuotaBinding[] = [];
@@ -2183,9 +1571,9 @@ export default function (pi: ExtensionAPI) {
 		state.inflight = true;
 		state.inflightTask = (async () => {
 			try {
-				const apiKey = await ctx.modelRegistry.getApiKeyForProvider(
-					b.providerId,
-				);
+				const apiKey = b.source.resolveApiKey
+					? await b.source.resolveApiKey(ctx, b.providerId)
+					: await ctx.modelRegistry.getApiKeyForProvider(b.providerId);
 				if (!apiKey) throw new Error("provider 未配置 API key");
 				const r = await b.source.fetch(b.origin, apiKey);
 				state.seg = r.seg;
@@ -2202,785 +1590,6 @@ export default function (pi: ExtensionAPI) {
 			}
 		})();
 		return state.inflightTask;
-	}
-
-	// ---------- 订阅统计（/statusbar subs） ----------
-
-	/** 扫描结果缓存 + 并发去重 */
-	let subsScan: ScanResult | null = null;
-	let subsScanning: Promise<ScanResult> | null = null;
-
-	/** 事件级单价：与 footer 的花费同源（priceTable + calcCost）；
-	 *  单价表查不到时回落 pi 自己算的 usage.cost.total（实测 ~2.7% 的消息走这里） */
-	function subEventCost(ev: SubEvent): number {
-		const rates = ev.p && ev.m ? priceTable[`${ev.p}:${ev.m}`] : undefined;
-		return calcCost(
-			rates,
-			{ input: ev.i, output: ev.o, cacheRead: ev.cr, cacheWrite: ev.cw },
-			ev.c,
-		);
-	}
-
-	async function ensureSubsScan(force: boolean): Promise<ScanResult> {
-		if (!force && subsScan && Date.now() - subsScan.scannedAt < SUBS_TTL_MS)
-			return subsScan;
-		if (subsScanning) return subsScanning;
-		subsScanning = scanSubEvents(force)
-			.then((r) => {
-				subsScan = r;
-				subsScanning = null;
-				return r;
-			})
-			.catch((e) => {
-				subsScanning = null;
-				throw e;
-			});
-		return subsScanning;
-	}
-
-	/** 实时额度里的结构化窗口（带 label/spanMs/resetAt）；余额类额度源的 row 没有 spanMs，天然跳过 */
-	function liveQuotaWindows(providerId: string): SubWindow[] {
-		const rows = quotaStates.get(providerId)?.seg?.rows;
-		if (!rows?.length) return [];
-		const out: SubWindow[] = [];
-		for (const r of rows) {
-			if (!r.label || !r.spanMs) continue;
-			out.push({
-				key: r.label,
-				spanMs: r.spanMs,
-				resetAt: r.resetAt,
-				percent: r.percent,
-			});
-		}
-		return out;
-	}
-
-	/**
-	 * 订阅的额度窗口来源（按优先级）：
-	 *   1. providerFilter 命中的 provider 的实时额度窗口（GLM/Kimi/OpenCode Go/MiniMax 自动生效）
-	 *   2. 该订阅命中事件里出现最多的 provider（只配了 modelFilter 也能自动对齐）
-	 *   3. subscriptions[].quotaWindows 显式声明（接口不可得时的手工兜底）
-	 * 这层存在的意义：会话日志里只有 token，没有窗口边界；要实现「额度窗口已用 token」
-	 * 就必须用 provider 的重置时刻反推窗口起点，否则 now-5h 的滚动和官方 5h 窗对不上。
-	 */
-	function quotaWindowsFor(sub: SubscriptionConfig, events: SubEvent[]): SubWindow[] {
-		const out: SubWindow[] = [];
-		const seen = new Set<string>();
-		const providerIds: string[] = [];
-		if (sub.providerFilter?.length) {
-			for (const b of bindings)
-				if (matchAny(sub.providerFilter, b.providerId))
-					providerIds.push(b.providerId);
-		}
-		const inferred = countBy(events, (e) => e.p)[0]?.id;
-		if (inferred && !providerIds.includes(inferred)) providerIds.push(inferred);
-		for (const pid of providerIds) {
-			for (const w of liveQuotaWindows(pid)) {
-				if (seen.has(w.key)) continue;
-				seen.add(w.key);
-				out.push(w);
-			}
-		}
-		for (const cw of sub.quotaWindows ?? []) {
-			if (seen.has(cw.key)) continue;
-			seen.add(cw.key);
-			out.push({ key: cw.key, spanMs: cw.spanMs });
-		}
-		return out;
-	}
-
-	function buildAllSubStats(events: SubEvent[], now: number) {
-		const subs = config.subscriptions;
-		const { byId, unattributed, discovered } = attributeEvents(
-			events,
-			subs,
-			config.autoDiscoverSubs,
-		);
-		const list = subs.map((s) =>
-			buildSubStats(
-				s,
-				byId.get(s.id) ?? [],
-				quotaWindowsFor,
-				subEventCost,
-				now,
-			),
-		);
-		// 自动发现行：扫到但没被任何 subscriptions 条目命中的 provider，按 30d 口径的 token 量
-		// 从大到小排（同量按 id 排序，保证重扫后行序稳定）。名字就是 provider id ——
-		// 不去猜美化规则，可预测；额度窗口由 quotaWindowsFor 里「本行用量最大的 provider」
-		// 自动认出来（本行事件只有一个 provider，推断必然命中），所以无需 providerFilter。
-		const auto = [...discovered.entries()]
-			.map(([pid, evs]) => ({
-				pid,
-				evs,
-				tokens: evs.reduce((n, e) => n + e.i + e.o, 0),
-			}))
-			.sort((a, b) => b.tokens - a.tokens || a.pid.localeCompare(b.pid));
-		for (const a of auto) {
-			list.push(
-				buildSubStats(
-					{ id: `__auto__:${a.pid}`, name: a.pid },
-					a.evs,
-					quotaWindowsFor,
-					subEventCost,
-					now,
-				),
-			);
-		}
-		// 未归属单独成行，避免「配置漏了一条」时用量凭空消失
-		const unattr = unattributed.length
-			? buildSubStats(
-					{ id: "__unattributed__", name: t().subsUnattributed },
-					unattributed,
-					() => [],
-					subEventCost,
-					now,
-				)
-			: null;
-		return { list, unattr };
-	}
-
-	/** 单元格：文本 + 目标列宽（按列排版；宽度算 visibleWidth，兼容 CJK 与 ANSI 颜色） */
-	interface Cell {
-		text: string;
-		w: number;
-		right?: boolean;
-	}
-
-	function cellsToLine(cells: Cell[], maxWidth: number): string {
-		let out = "";
-		for (const c of cells) {
-			const pad = Math.max(0, c.w - visibleWidth(c.text));
-			out +=
-				c.right && pad > 0
-					? " ".repeat(pad) + c.text
-					: c.text + " ".repeat(pad);
-		}
-		return truncateToWidth(out, maxWidth);
-	}
-
-	/**
-	 * widget 行必须铺满宽度：widget 只覆盖自己那几行，同一行右侧不会有人帮忙重绘，
-	 * 不留白就会残留上一帧内容（overlay 时代用 fill() 铺满整屏，widget 只需铺行）。
-	 */
-	function padToWidth(line: string, width: number): string {
-		const w = visibleWidth(line);
-		if (w >= width) return truncateToWidth(line, width);
-		return line + " ".repeat(width - w);
-	}
-
-	/**
-	 * 把额度摘要片段（"5h 42%"）拼到可用宽度内，放不下就从**尾部**丢弃，
-	 * 并补一个 `+N` 明确告知还有几个窗口没显示（避免看上去像“窗口凭空少了”）。
-	 * 为什么不直接交给 truncateToWidth：它会把尾段切成 "月编..."，看不出是哪个窗口。
-	 */
-	function fitSegments(segs: string[], width: number): string {
-		if (width <= 0 || segs.length === 0) return "";
-		const joinTo = (n: number) => segs.slice(0, n).join(" · ");
-		if (visibleWidth(joinTo(segs.length)) <= width) return joinTo(segs.length);
-		for (let n = segs.length - 1; n >= 1; n--) {
-			const cand = `${joinTo(n)} +${segs.length - n}`;
-			if (visibleWidth(cand) <= width) return cand;
-		}
-		return truncateToWidth(segs[0], width);
-	}
-
-	/** 订阅统计全屏面板：↑↓ 选订阅，←→ 选热力图周期，h 切 tokens/费用，r 重扫 */
-	/**
-	 * 订阅统计浮层组件 —— 形态与交互对齐 pi-subagents 的 fleet inspector
-	 * （其 src/tui/fleet.ts 的 SubagentFleetComponent + openSubagentFleet）：
-	 *   - 打开方式 ctx.ui.custom + { overlay: true, overlayOptions: { anchor: "center",
-	 *     width: "95%", minWidth: 60, maxHeight: "85%", margin: 1 } }：居中带边框的浮层，
-	 *     **键盘可交互**（custom 会把焦点交给 overlay 组件；收不到键盘的是 widget，不是 overlay）；
-	 *   - 组件自己画满整个矩形（╭─╮ / │ / ╰─╯，每行严格等于 width）：pi 合成浮层时也会把
-	 *     浮层区域 pad 到声明宽度（tui.js compositeTuiLine 的 overlayPad），区域内不会漏出
-	 *     底层；边框外露出的就是底层**正常 UI**（聊天 / 右栏分栏）—— 早期「漏字」是因为
-	 *     既想铺满整屏又没真铺满；现在不铺满，让底层 UI 自然露出来即可；
-	 *   - 高度自己算：bodyH = floor(rows * 0.85) - 4（与 maxHeight: "85%" 对应；fleet 是
-	 *     -6，它多一条分隔线）。渲染行数恒定 → 浮层是稳定矩形，不随内容抖动。
-	 */
-	class SubsPanelComponent {
-		rows: SubStats[] = [];
-		meta: ScanResult | null = null;
-		error: string | null = null;
-		loading = true;
-		private sel = 0;
-		private heatIdx = 0;
-		private heatMetric: "tokens" | "costUSD" = "tokens";
-		private cachedW = -1;
-		private cachedBodyH = -1;
-		private cachedLines?: string[];
-
-		constructor(
-			private theme: Theme,
-			private tui: TUI,
-			private done: () => void,
-			/** r 键触发：让外层强制重扫并回填（openSubsPanel 传入 loadSubsData） */
-			private onReload: () => void,
-		) {}
-
-		/** 数据回填 / 状态变化后调用：作废渲染缓存并请求重绘（外部回填只需调这一个） */
-		invalidate(): void {
-			this.cachedLines = undefined;
-			try {
-				this.tui.requestRender();
-			} catch {
-				// TUI 已销毁（关面板瞬间的回填竞态），忽略
-			}
-		}
-
-		/** 第一个「窗口内有事件」的窗口下标（额度窗口在前、固定四档在后的展示顺序）；全空返回 0 */
-		private firstWindowIdxWithData(windows: WindowStats[]): number {
-			const idx = windows.findIndex((w) => w.tokens > 0 || w.requests > 0);
-			return idx >= 0 ? idx : 0;
-		}
-
-		/** 首次载入后把光标落在 30d 用量最大的订阅上：配置顺序里第一条可能没有近期用量，
-		 *  死守第 0 行会让面板一打开就是空热力图（首屏观感差）。❯ 标记会明确当前选中的是哪一行 */
-		initSelection(): void {
-			let best = 0;
-			let bestTokens = -1;
-			this.rows.forEach((r, i) => {
-				const t30 = r.windows.find((w) => w.key === "30d")?.tokens ?? 0;
-				if (t30 > bestTokens) {
-					bestTokens = t30;
-					best = i;
-				}
-			});
-			this.sel = best;
-			this.heatIdx = this.firstWindowIdxWithData(this.rows[best]?.windows ?? []);
-		}
-
-		/**
-		 * 键盘交互。custom(overlay) 会把焦点交给本组件（widget 才是收不到键盘的）：
-		 *   ↑↓/k/j 切订阅 · ←→ 切热力图周期 · h 切指标 · r 强制重扫 · Esc/q/ctrl+c 关闭
-		 * 键位风格与 fleet inspector 的 defaultFleetKeybindings 一致（selectUp: ["up","k"]）。
-		 */
-		handleInput(data: string): void {
-			if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || data === "q") {
-				this.done();
-				return;
-			}
-			if (matchesKey(data, "up") || data === "k") return this.moveSel(-1);
-			if (matchesKey(data, "down") || data === "j") return this.moveSel(1);
-			if (matchesKey(data, "left")) return this.cycleHeat(-1);
-			if (matchesKey(data, "right")) return this.cycleHeat(1);
-			if (data === "h") {
-				this.heatMetric = this.heatMetric === "tokens" ? "costUSD" : "tokens";
-				this.touch();
-				return;
-			}
-			if (data === "r") this.onReload();
-		}
-
-		/** 改状态后清缓存 + 请求重绘 */
-		private touch(): void {
-			this.invalidate();
-		}
-
-		/** 切订阅，顺带把热力图落到第一个有数据的窗口 */
-		private moveSel(dir: 1 | -1): void {
-			const n = this.rows.length;
-			if (!n) return;
-			this.sel = (this.sel + dir + n) % n;
-			this.heatIdx = this.firstWindowIdxWithData(this.rows[this.sel]?.windows ?? []);
-			this.touch();
-		}
-
-		/** 切热力图周期 */
-		private cycleHeat(dir: 1 | -1): void {
-			const wins = this.rows[this.sel]?.windows ?? [];
-			if (!wins.length) return;
-			this.heatIdx = (this.heatIdx + dir + wins.length) % wins.length;
-			this.touch();
-		}
-
-		/** 浮层正文的行数预算：终端高度 85%（与 overlayOptions.maxHeight 对应）
-		 *  减去边框与标题/提示 4 行；下限 6，保证空态也有个能看的框 */
-		private bodyHeight(): number {
-			const rows = this.tui.terminal?.rows ?? 32;
-			return Math.max(6, Math.floor(rows * 0.85) - 4);
-		}
-
-		render(width: number): string[] {
-			// 渲染期异常绝不允许冒泡：pi 会当未捕获异常直接退出进程
-			try {
-				const innerW = width - 2;
-				if (innerW < 38)
-					return [truncateToWidth(t().subsTooNarrow, width)];
-				const bodyH = this.bodyHeight();
-				if (this.cachedLines && this.cachedW === width && this.cachedBodyH === bodyH)
-					return this.cachedLines;
-				const th = this.theme;
-				const T = t();
-				const box = (content: string): string =>
-					th.fg("border", "│") + padToWidth(content, innerW) + th.fg("border", "│");
-				const lines: string[] = [
-					th.fg("border", `╭${"─".repeat(innerW)}╮`),
-					box(`${th.fg("accent", T.subsTitle)}  ${th.fg("dim", this.metaLine())}`),
-				];
-				for (const l of this.renderBody(innerW, bodyH)) lines.push(box(l));
-				lines.push(box(th.fg("dim", T.subsHint)));
-				lines.push(th.fg("border", `╰${"─".repeat(innerW)}╯`));
-				const out = lines.map((l) => truncateToWidth(l, width));
-				this.cachedW = width;
-				this.cachedBodyH = bodyH;
-				this.cachedLines = out;
-				return out;
-			} catch (e) {
-				return [truncateToWidth(`订阅面板渲染失败: ${e}`, width)];
-			}
-		}
-
-		private metaLine(): string {
-			const m = this.meta;
-			if (!m) return "";
-			return t().subsScanning(m.files, m.events.length, m.parsedFiles);
-		}
-
-		private rule(label: string, width: number): string {
-			const th = this.theme;
-			const head = `${th.fg("accent", label)} `;
-			const rest = Math.max(0, width - visibleWidth(head) - 1);
-			return truncateToWidth(head + th.fg("dim", "─".repeat(rest)), width);
-		}
-
-		/** 行数不足 budget 时用空行补齐（浮层行数恒定），超了则裁掉 */
-		private padBody(lines: string[], budget: number): string[] {
-			const out = [...lines];
-			while (out.length < budget) out.push("");
-			return out.slice(0, budget);
-		}
-
-		/** 掐掉段落首尾的空行：拼装时段落间距统一由 renderBody 控制，避免出现双空行 */
-		private trimBlank(lines: string[]): string[] {
-			const a = [...lines];
-			while (a.length && a[0] === "") a.shift();
-			while (a.length && a[a.length - 1] === "") a.pop();
-			return a;
-		}
-
-		/**
-		 * 正文（不含边框/标题/提示行），预算 = bodyHeight。
-		 * 预算分配：热力图自然高（11 行）优先，列表拿剩下的（浮层比之前的 widget 高得多，
-		 * 上限放到 16 行，十个八个订阅基本能一屏列完），明细只在真有余量时出现；
-		 * 超预算时：1) 明细整段丢 → 2) 裁热力图尾部 → 3) 只剩列表。
-		 */
-		private renderBody(width: number, budget: number): string[] {
-			const th = this.theme;
-			const T = t();
-
-			if (this.error) return this.padBody([th.fg("error", this.error)], budget);
-			if (this.loading) return this.padBody([th.fg("muted", T.subsLoading)], budget);
-			if (this.rows.length === 0)
-				return this.padBody([th.fg("muted", T.subsNoConfig)], budget);
-
-			if (this.sel >= this.rows.length) this.sel = this.rows.length - 1;
-			const sel = this.rows[this.sel];
-
-			const heatNatural = 11;
-			// 列表预留 5 行余量：间隙 1 + 分隔线/总计 2 + 尾部空行与明细门限 2
-			const listRows = Math.max(2, Math.min(16, budget - heatNatural - 5));
-			const gap = [""];
-			const list = this.trimBlank(this.renderList(width, listRows));
-			const heat = this.trimBlank(this.renderHeat(sel, width));
-			const detail = this.trimBlank(this.renderDetail(sel, width));
-
-			let body = [...list, ...gap, ...heat];
-			const availDetail = budget - body.length - 1;
-			if (detail.length >= 2 && availDetail >= 4)
-				body = [...body, ...gap, ...detail.slice(0, availDetail - 1)];
-			if (body.length > budget) body = [...list, ...gap, ...heat];
-			if (body.length > budget)
-				body = [...list, ...heat.slice(0, Math.max(2, budget - list.length - 1))];
-			if (body.length > budget) body = list.slice(0, budget);
-			return this.padBody(body, budget);
-		}
-		/** 订阅列表：名称 | 30d 占比条 | today/24h/7d/30d tokens | 7d/30d 费用 | 额度% */
-		/**
-		 * 订阅列表。maxRows 是**视窗高度**：浮层里以选中行为中心开窗（保证 ❯ 始终可见），
-		 * 并在表头标出当前窗口范围（如 3-6/10）。这样 ↑↓ 走遍所有订阅时窗口跟随。
-		 */
-		private renderList(width: number, maxRows: number): string[] {
-			const th = this.theme;
-			const T = t();
-			const nameW = Math.max(12, Math.min(24, Math.floor(width * 0.2)));
-			const tW = 9;
-			const cW = 8;
-			const barW = 10;
-			const hasQuota = this.rows.some((r) =>
-				r.windows.some((w) => w.percent != null),
-			);
-			const tokensOf = (r: SubStats, key: string) =>
-				r.windows.find((w) => w.key === key)?.tokens ?? 0;
-			// 占比条以 30d tokens 的最大者为满格：一眼看出谁在用
-			const max30d = Math.max(0, ...this.rows.map((r) => tokensOf(r, "30d")));
-			const fixedW = nameW + tW * FIXED_WINDOWS.length + cW * 2;
-			const showCost = width >= fixedW + 10;
-			const showBar = width >= fixedW + barW + 10;
-			// 数字块与额度列之间必须留间隔，否则右对齐的费用会和额度粘成 "$32.45h 42%"
-			const quotaGap = 2;
-			// 额度列只在真有额度数据时才占位（否则表头会出现一个永远空白的列）
-			const barReserve = showBar ? barW : 0;
-			const quotaW = hasQuota
-				? Math.max(0, width - fixedW - barReserve - quotaGap)
-				: 0;
-			const showQuota = hasQuota && quotaW > 6;
-
-			// 视窗：以选中行为中心开窗（❯ 永远在窗口内），表头标出当前范围
-			const total = this.rows.length;
-			const rowsN = Math.max(1, Math.min(maxRows, total));
-			const selRow = Math.min(this.sel, Math.max(0, total - 1));
-			const start =
-				total > rowsN
-					? Math.min(
-							Math.max(0, selRow - Math.floor(rowsN / 2)),
-							total - rowsN,
-						)
-					: 0;
-			const view = this.rows.slice(start, start + rowsN);
-
-			const header: Cell[] = [
-				{
-					text: total > rowsN ? `${T.subsHeaderName} ${start + 1}-${start + rowsN}/${total}` : T.subsHeaderName,
-					w: nameW,
-				},
-			];
-			if (showBar) header.push({ text: "", w: barW });
-			header.push(
-				...FIXED_WINDOWS.map((w) => ({ text: w.key, w: tW, right: true })),
-			);
-			if (showCost) {
-				header.push({ text: "7d $", w: cW, right: true });
-				header.push({ text: "30d $", w: cW, right: true });
-			}
-			if (showQuota) {
-				header.push({ text: "", w: quotaGap });
-				header.push({ text: T.subsQuotaUsed, w: quotaW });
-			}
-
-			const out: string[] = [th.fg("dim", cellsToLine(header, width))];
-			view.forEach((r, vi) => {
-				const i = start + vi;
-				const isSel = i === this.sel;
-				const marker = isSel ? th.fg("accent", "❯") : " ";
-				const nameRaw = truncateToWidth(r.sub.name, nameW - 1);
-				const name = isSel ? th.fg("text", nameRaw) : th.fg("muted", nameRaw);
-				const cells: Cell[] = [
-					{ text: `${marker}${name}`, w: nameW },
-				];
-				if (showBar) {
-					const bar = barLine(tokensOf(r, "30d"), max30d, barW - 1);
-					cells.push({
-						text: isSel ? th.fg("accent", bar) : th.fg("muted", bar),
-						w: barW,
-					});
-				}
-				cells.push(
-					...FIXED_WINDOWS.map((fw) => {
-						const w = r.windows.find((x) => x.key === fw.key);
-						return {
-							text: w ? fmtTokensShort(w.tokens) : "—",
-							w: tW,
-							right: true,
-						};
-					}),
-				);
-				if (showCost) {
-					for (const k of ["7d", "30d"]) {
-						const w = r.windows.find((x) => x.key === k);
-						if (w) {
-							cells.push({
-								text: th.fg(costTone(w.costUSD), fmtCostShort(w.costUSD)),
-								w: cW,
-								right: true,
-							});
-						} else {
-							cells.push({ text: "—", w: cW, right: true });
-						}
-					}
-				}
-				if (showQuota) {
-					const segs: string[] = [];
-					for (const w of r.windows) {
-						if (w.percent == null) continue;
-						segs.push(`${w.key} ${Math.round(w.percent)}%`);
-					}
-					cells.push({ text: "", w: quotaGap });
-					cells.push({ text: fitSegments(segs, quotaW), w: quotaW });
-				}
-				out.push(cellsToLine(cells, width));
-			});
-			// 总计行：跨所有订阅（含未归属）求和，钉在列表底部，不参与 ↑↓ 选择。
-			// 额度% 不可加和（各家窗口口径不同），留空；占比条恒满格（总计天然是最大值）
-			out.push(th.fg("dim", "─".repeat(Math.min(width, 70))));
-			const sumTok = (key: string) =>
-				this.rows.reduce((a, r) => a + tokensOf(r, key), 0);
-			const sumCost = (key: string) =>
-				this.rows.reduce(
-					(a, r) =>
-						a + (r.windows.find((w) => w.key === key)?.costUSD ?? 0),
-					0,
-				);
-			const totalCells: Cell[] = [
-				// 与普通行的 ❯/空格 标记位对齐
-				{ text: ` ${th.fg("text", T.subsTotal)}`, w: nameW },
-			];
-			if (showBar) {
-				totalCells.push({
-					text: th.fg("accent", barLine(sumTok("30d"), sumTok("30d"), barW - 1)),
-					w: barW,
-				});
-			}
-			totalCells.push(
-				...FIXED_WINDOWS.map((fw) => ({
-					text: fmtTokensShort(sumTok(fw.key)),
-					w: tW,
-					right: true,
-				})),
-			);
-			if (showCost) {
-				for (const k of ["7d", "30d"]) {
-					const c = sumCost(k);
-					totalCells.push({
-						text: th.fg(costTone(c), fmtCostShort(c)),
-						w: cW,
-						right: true,
-					});
-				}
-			}
-			if (showQuota) {
-				totalCells.push({ text: "", w: quotaGap });
-				totalCells.push({ text: "", w: quotaW });
-			}
-			out.push(cellsToLine(totalCells, width));
-			out.push("");
-			return out;
-		}
-
-		/** 选中订阅的逐周期明细：近 30 天 sparkline + 按周期表格 */
-		private renderDetail(sel: SubStats, width: number): string[] {
-			const th = this.theme;
-			const T = t();
-			const out: string[] = [this.rule(`${T.subsDetail}: ${sel.sub.name}`, width)];
-			if (!sel.events.length) {
-				out.push(th.fg("dim", T.subsNoEvents));
-				return out;
-			}
-			// 近 30 天按天 sparkline：最能消除「纯数字」观感的一行
-			const daily = dailyBuckets(sel.events, 30, Date.now());
-			const dayTotal = daily.reduce((a, b) => a + b, 0);
-			const dayPeak = Math.max(0, ...daily);
-			out.push(
-				`${th.fg("dim", T.subsDaily.padEnd(8))} ${th.fg("accent", sparkline(daily))}  ${th.fg(
-					"dim",
-					T.subsDailyTotal(fmtTokensShort(dayTotal), fmtTokensShort(dayPeak)),
-				)}`,
-			);
-			const cols: Cell[] = [
-				{ text: "", w: 7 },
-				{ text: "tokens", w: 10, right: true },
-				{ text: "in", w: 9, right: true },
-				{ text: "out", w: 9, right: true },
-				{ text: "cache", w: 10, right: true },
-				{ text: "cost", w: 10, right: true },
-				{ text: "req", w: 7, right: true },
-				{ text: "used", w: 8, right: true },
-			];
-			out.push(th.fg("dim", cellsToLine(cols, width)));
-			// 表头下加一条细分隔线，让表与表头分层
-			out.push(th.fg("dim", "─".repeat(Math.min(width, 70))));
-			for (const w of sel.windows) {
-				let used = "—";
-				if (w.percent != null)
-					used = `${Math.round(w.percent)}%${w.aligned ? "⟲" : ""}`;
-				// 窗口 key 着色：对齐了真实额度边界的用 accent，纯滚动的用 muted
-				const keyText = w.aligned ? th.fg("accent", w.key) : th.fg("muted", w.key);
-				out.push(
-					cellsToLine(
-						[
-							{ text: keyText, w: 7 },
-							{ text: fmtTokensShort(w.tokens), w: 10, right: true },
-							{ text: fmtTokensShort(w.input), w: 9, right: true },
-							{ text: fmtTokensShort(w.output), w: 9, right: true },
-							{
-								text: fmtTokensShort(w.cacheRead + w.cacheWrite),
-								w: 10,
-								right: true,
-							},
-							{ text: th.fg(costTone(w.costUSD), fmtCost(w.costUSD)), w: 10, right: true },
-							{ text: `${w.requests}`, w: 7, right: true },
-							{ text: used, w: 8, right: true },
-						],
-						width,
-					),
-				);
-			}
-			// 全期合计（受会话日志保留期限制，不代表订阅全生命周期）
-			out.push(
-				th.fg(
-					"dim",
-					cellsToLine(
-						[
-							{ text: "all", w: 7 },
-							{ text: fmtTokensShort(sel.total.tokens), w: 10, right: true },
-							{ text: "", w: 9 },
-							{ text: "", w: 9 },
-							{ text: "", w: 10 },
-							{ text: fmtCost(sel.total.costUSD), w: 10, right: true },
-							{ text: `${sel.total.requests}`, w: 7, right: true },
-							{ text: "", w: 8 },
-						],
-						width,
-					),
-				),
-			);
-			return out;
-		}
-
-		/** 7×24 热力图（选中订阅 + 选中周期） */
-		private renderHeat(sel: SubStats, width: number): string[] {
-			const th = this.theme;
-			const T = t();
-			if (!sel.windows.length) return [];
-			const w = sel.windows[Math.min(this.heatIdx, sel.windows.length - 1)];
-			const unit = this.heatMetric === "tokens" ? T.subsTokens : T.subsCost;
-			const header = this.rule(
-				`${T.subsHeatmap} · ${w.key} · ${unit}${w.aligned ? " · ⟲对齐额度窗口" : ""}`,
-				width,
-			);
-			// 窗口内 0 事件：明确提示，不要只画一片 · 让人以为坏了
-			if (w.tokens <= 0 && w.requests <= 0) {
-				return ["", header, th.fg("dim", `   ${T.subsHeatEmpty}`)];
-			}
-			const grid = buildHeatGrid(sel.events, w.since, w.until, subEventCost);
-			const max = heatGridMax(grid, this.heatMetric);
-			const out: string[] = ["", header];
-			// 小时刻度：24 列里在 0/6/12/18 处放标签
-			const hourChars = new Array<string>(24).fill(" ");
-			for (const h of [0, 6, 12, 18])
-				hourChars[h] = String(h).padStart(2, "0");
-			out.push(th.fg("dim", `   ${hourChars.join("")}`));
-			const days =
-				config.language === "zh"
-					? ["日", "一", "二", "三", "四", "五", "六"]
-					: ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
-			for (let d = 0; d < 7; d++) {
-				let row = "";
-				let rowTotal = 0;
-				for (let h = 0; h < 24; h++) {
-					const cell = grid[d][h];
-					const v = this.heatMetric === "tokens" ? cell.tokens : cell.costUSD;
-					rowTotal += v;
-					const lvl = heatLevel(v, max);
-					row += th.fg(HEAT_COLORS[lvl], HEAT_GLYPHS[lvl]);
-				}
-				// 行尾加该周几的合计：让每天之间的相对量级不用逐格读。
-				// 为 0 时留空：一串 0 只会干扰读图
-				if (rowTotal <= 0) {
-					out.push(`${th.fg("dim", days[d].padStart(2))} ${row}`);
-					continue;
-				}
-				const totalTxt =
-					this.heatMetric === "tokens" ? fmtTokensShort(rowTotal) : fmtCostShort(rowTotal);
-				out.push(
-					`${th.fg("dim", days[d].padStart(2))} ${row}  ${th.fg("dim", totalTxt.padStart(6))}`,
-				);
-			}
-			out.push(
-				th.fg(
-					"dim",
-					`   ${HEAT_GLYPHS.join("")}  max ${this.heatMetric === "tokens" ? fmtTokensShort(max) : fmtCost(max)}`,
-				),
-			);
-			return out;
-		}
-	}
-
-	// ---- 订阅统计浮层 ----
-	// 形态选择：overlay（ctx.ui.custom + overlay: true，pi-subagents fleet inspector 同款），
-	// 不是贴编辑器上方的 widget —— 用户要的是**可交互浮层**：overlay 拿得到键盘
-	// （custom 把焦点交给 overlay 组件；收不到键盘的是 widget，handleInput 永不被调用）。
-	let subsPanelOpen = false;
-	/** 选中态是「首次载入才自动定位到用量最大订阅」的一次性开关；
-	 *  每次打开浮层都重置：浮层是即开即走的临时界面，每次打开都应重新定位 */
-	let subsSelectionInitialized = false;
-
-	/** 拉取/重算数据并回填到浮层组件（打开时 force=false 走缓存，r 键 force=true 重扫）。
-	 *  竞态安全：浮层被 Esc 关掉后组件只是没人再渲染的普通对象，改字段无害 */
-	async function loadSubsData(
-		ctx: ExtensionContext,
-		force: boolean,
-		c: SubsPanelComponent,
-	): Promise<void> {
-		c.loading = true;
-		c.error = null;
-		c.invalidate();
-		try {
-			// 额度窗口对齐要用实时额度，且必须等它回来再算：
-			// 边算边长（fire-and-forget）会让首屏只拿到「已暖过」的 provider 的额度窗口。
-			// 但不能无限等（离线/接口慢），最多等 SUBS_QUOTA_WAIT_MS。
-			await Promise.race([
-				Promise.all(bindings.map((b) => refreshQuota(b, ctx, false))),
-				new Promise((r) => setTimeout(r, SUBS_QUOTA_WAIT_MS)),
-			]);
-			const r = await ensureSubsScan(force);
-			const { list, unattr } = buildAllSubStats(r.events, Date.now());
-			c.rows = unattr ? [...list, unattr] : list;
-			if (!subsSelectionInitialized) {
-				subsSelectionInitialized = true;
-				c.initSelection();
-			}
-			c.meta = r;
-			c.loading = false;
-		} catch (e) {
-			c.loading = false;
-			c.error = t().subsScanFailed(e);
-		}
-		c.invalidate();
-	}
-
-	/**
-	 * /statusbar subs：打开订阅统计浮层（fleet inspector 同款形态与键位）。
-	 * 先渲染「扫描中…」，数据到位后回填；Esc/q 关闭后焦点自动回到编辑器。
-	 */
-	async function openSubsPanel(ctx: ExtensionContext): Promise<void> {
-		if (ctx.mode !== "tui") {
-			ctx.ui.notify(t().noTui, "warning");
-			return;
-		}
-		if (subsPanelOpen) return; // 防重入；浮层开着时编辑器本来就拿不到输入
-		subsPanelOpen = true;
-		subsSelectionInitialized = false;
-		try {
-			await ctx.ui.custom<undefined>(
-				(tui, theme, _keybindings, done) => {
-					const component = new SubsPanelComponent(
-						theme,
-						tui,
-						() => done(undefined),
-						() => void loadSubsData(ctx, true, component),
-					);
-					// 不等：先渲染「扫描中…」，数据到位后回填（loadSubsData 自己兜异常，
-					// 不会漏 rejection；最多等 SUBS_QUOTA_WAIT_MS 的额度响应）
-					void loadSubsData(ctx, false, component);
-					return component;
-				},
-				{
-					overlay: true,
-					// 与 fleet 一致：居中 95% 宽、最多 85% 高，四周各留 1 列/行让底层 UI 呼吸
-					overlayOptions: {
-						anchor: "center",
-						width: "95%",
-						minWidth: 60,
-						maxHeight: "85%",
-						margin: 1,
-					},
-				},
-			);
-		} finally {
-			subsPanelOpen = false;
-		}
 	}
 
 	// ---------- 实时单价（models.dev） ----------
@@ -4032,7 +2641,7 @@ export default function (pi: ExtensionAPI) {
 
 	// ---------- 命令与事件 ----------
 
-	type MenuAction = "metrics" | "toggle" | "subs";
+	type MenuAction = "metrics" | "toggle";
 
 	/** 将一块输入拆分为独立按键序列（终端快速按键可能合并为单个 data 块送达） */
 	function splitKeySeqs(data: string): string[] {
@@ -4071,7 +2680,7 @@ export default function (pi: ExtensionAPI) {
 		private sel = 0;
 		private cachedW?: number;
 		private cachedLines?: string[];
-		private static readonly ROWS = 8;
+		private static readonly ROWS = 7;
 
 		constructor(
 			private theme: Theme,
@@ -4151,8 +2760,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (matchesKey(data, "return")) {
 				if (this.sel === 5) return this.close("metrics");
-				if (this.sel === 6) return this.close("subs");
-				if (this.sel === 7) return this.close("toggle");
+				if (this.sel === 6) return this.close("toggle");
 				return this.close(null); // 布局/边框/填充/入栏/语言行：已实时生效，Enter 即完成退出
 			}
 		}
@@ -4169,7 +2777,6 @@ export default function (pi: ExtensionAPI) {
 				T.rowDock,
 				T.rowLang,
 				T.rowMetrics,
-				T.rowSubs,
 				userWants ? T.rowDisable : T.rowEnable,
 			];
 			// 值列紧跟标签：固定列宽 = 最长标签 + 3，不再贴右边缘
@@ -4256,10 +2863,8 @@ export default function (pi: ExtensionAPI) {
 					width,
 				),
 			);
-			// 行 6：订阅统计面板（/statusbar subs）
+			// 行 6：启用/停用
 			lines.push(menuRow(th, this.sel === 6, labels[6], "", labelCol, width));
-			// 行 7：启用/停用
-			lines.push(menuRow(th, this.sel === 7, labels[7], "", labelCol, width));
 			lines.push("");
 			lines.push(truncateToWidth(`  ${th.fg("dim", T.menuHint)}`, width));
 			lines.push("");
@@ -4696,7 +3301,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("statusbar", {
 		description:
-			"状态栏设置：无参数打开交互菜单；子命令 on/off | layout [right|bottom|auto|split] | split [on|off] | border [auto|unicode|ascii] | fill [on|off] | dock [on|off] | metrics | subs | quota | prices",
+			"状态栏设置：无参数打开交互菜单；子命令 on/off | layout [right|bottom|auto|split] | split [on|off] | border [auto|unicode|ascii] | fill [on|off] | dock [on|off] | metrics | quota | prices",
 		handler: async (args, ctx) => {
 			const parts = args.trim().toLowerCase().split(/\s+/).filter(Boolean);
 			const sub = parts[0];
@@ -4770,19 +3375,6 @@ export default function (pi: ExtensionAPI) {
 				await runMetricsPicker(ctx);
 				return;
 			}
-			// sub / subscriptions 也收：subs 少打一个 s 是常见误输，没必要让人对着报错再试一次。
-			// 浮层自带键盘（custom overlay 有焦点），无需任何子命令
-			if (sub === "subs" || sub === "sub" || sub === "subscriptions") {
-				if (parts[1]) {
-					ctx.ui.notify(
-						`未知参数: subs ${parts[1]}。浮层内用键盘：↑↓/jk 切订阅 · ←→ 切周期 · h 切指标 · r 重扫 · Esc 关闭`,
-						"warning",
-					);
-					return;
-				}
-				await openSubsPanel(ctx);
-				return;
-			}
 			if (sub === "quota") {
 				await refreshQuotaNow(ctx);
 				return;
@@ -4793,7 +3385,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (sub) {
 				ctx.ui.notify(
-					`未知子命令: ${sub}。用法: /statusbar [on|off|layout [right|bottom|auto|split]|split [on|off]|border [auto|unicode|ascii]|fill [on|off]|dock [on|off]|metrics|subs|quota|prices]，或无参数打开交互菜单`,
+					`未知子命令: ${sub}。用法: /statusbar [on|off|layout [right|bottom|auto|split]|split [on|off]|border [auto|unicode|ascii]|fill [on|off]|dock [on|off]|metrics|quota|prices]，或无参数打开交互菜单`,
 					"warning",
 				);
 				return;
@@ -4815,10 +3407,6 @@ export default function (pi: ExtensionAPI) {
 				if (action === "metrics") {
 					await runMetricsPicker(ctx);
 					continue; // 回到菜单可继续操作
-				}
-				if (action === "subs") {
-					await openSubsPanel(ctx);
-					continue; // 关掉浮层后回到菜单可继续操作
 				}
 				toggleStatusbar(ctx);
 				return;
