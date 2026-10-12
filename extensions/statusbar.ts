@@ -27,6 +27,7 @@
  *     SiliconFlow（siliconflow.cn/.com）         → 按量账户余额（无重置概念）
  *     StepFun（stepfun.com/.ai）                 → 按量账户余额（无重置概念）
  *     Novita AI（novita.ai）                     → 按量账户余额（无重置概念）
+ *     magpie（本机网关 127.0.0.1:3425）           → 本会话当前模型实际路由到的那个账号的窗口/余额（订阅/套餐/按量都行）
  *   每个窗口用量后括注 (恢复倒计时)（45s/13m/2h13m/6d4h；不足 24h 按 xhyym，超 24h 按 xdyyh，渲染时按重置时刻实时换算）；
  *   底部单行各窗口用 · 连接，右侧面板逐窗口分行；带 TTL 缓存，失败静默；/statusbar quota 强制刷新并显示详情
  * - /exit 为 /quit 的别名，优雅退出 pi
@@ -136,16 +137,27 @@ interface QuotaSeg {
 	maxPercent?: number;
 }
 
+/** 交给额度源的会话上下文：magpie 靠它定位「本会话这一轮实际被服务的上游账号」 */
+interface QuotaFetchInfo {
+	/** 当前模型 id（provider 内的 id，如 magpie 的 `kimi-code-cn/k3`） */
+	modelId?: string;
+	/** 当前会话 id（magpie 的 X-Magpie-Session 与之一致，由 sendSessionAffinityHeaders 发出） */
+	sessionId?: string;
+}
+
 /** 订阅额度源：按 provider baseUrl 匹配，从 provider origin 拉取 */
 interface QuotaSource {
 	id: string;
 	match: RegExp;
 	ttlMs: number;
+	/** 额度随模型变化（magpie 按路由到的上游账号取数）：切模型即视为过期，不等 TTL */
+	modelAware?: boolean;
 	/** 少数额度接口需要不同于推理端的凭据（如 Copilot 的 GitHub OAuth token） */
 	resolveApiKey?(ctx: ExtensionContext, providerId: string): Promise<string | undefined>;
 	fetch(
 		origin: string,
 		apiKey: string,
+		info?: QuotaFetchInfo,
 	): Promise<{ seg: QuotaSeg | null; detail: string }>;
 }
 
@@ -1457,6 +1469,193 @@ const QUOTA_SOURCES: QuotaSource[] = [
 			};
 		},
 	},
+	{
+		id: "Magpie",
+		// magpie（usemagpie.ai）在本机跑一个 LLM 网关：pi 指向它时，上游账号的额度只有它知道
+		// （magpie quota --json 与 GET /v1/magpie/quotas 是同一份数据）。
+		// 只匹配回环地址、不限定端口（端口见 ~/.config/magpie/settings.json 的 port），
+		// 因此先问 /api/hello 认身份：本机别的服务（vLLM、Ollama…）不会被当成额度源。
+		// 非回环的 magpie（局域网共享）不匹配：那条路要网关 key，暂不猜。
+		match: /^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?(?:\/|$)/,
+		ttlMs: 60_000,
+		// footer 显示哪个账号取决于本会话当前模型（route 定位），切模型就作废缓存，不等 TTL
+		modelAware: true,
+		async fetch(origin, apiKey, info) {
+			const headers = { Authorization: `Bearer ${apiKey}` };
+			// 文案里只用 host（origin 已在 resolveQuotaBindings 里验过，这里不重复 new URL）
+			const host = origin.replace(/^https?:\/\//, "").replace(/\/$/, "");
+			const hello = await fetchQuotaJson(`${origin}/api/hello`, headers);
+			if (hello?.name !== "magpie")
+				return {
+					seg: null,
+					detail: `本机 ${host} 不是 magpie（/api/hello 未回 name=magpie）`,
+				};
+			// route 说本会话这一轮实际被服务的是哪个上游模型（magpie 按 X-Magpie-Session 记的），
+			// 拿不到就退回全局 last；与额度并行取，失败不影响额度
+			const routeUrl = info?.sessionId
+				? `${origin}/v1/magpie/route?session=${encodeURIComponent(info.sessionId)}`
+				: "";
+			const [json, route] = await Promise.all([
+				fetchQuotaJson(`${origin}/v1/magpie/quotas`, headers),
+				routeUrl ? fetchQuotaJson(routeUrl, headers).catch(() => null) : Promise.resolve(null),
+			]);
+			const items: any[] = Array.isArray(json?.data) ? json.data : [];
+			if (!items.length) return { seg: null, detail: "magpie 未读到任何订阅/套餐/余额" };
+
+			/** magpie 的窗口名是英文（5 hours / 7 days / Month / Cursor Models…）：通用时间窗归一化，其余原样 */
+			const windowLabel = (name: unknown): string => {
+				const raw = typeof name === "string" ? name.trim() : "";
+				switch (raw.toLowerCase()) {
+					case "5 hours":
+					case "5 hour":
+					case "5h":
+						return "5h";
+					case "7 days":
+					case "7d":
+					case "weekly":
+					case "week":
+						return "周";
+					case "month":
+					case "monthly":
+						return "月";
+					default:
+						return raw || "额度";
+				}
+			};
+			/** 账号名优先用用户自己的命名（alias），否则 provider 给的名字 */
+			const accountName = (q: any): string => {
+				for (const key of ["alias", "name", "provider"]) {
+					const v = q?.[key];
+					if (typeof v === "string" && v.trim()) return v.trim();
+				}
+				return "magpie";
+			};
+			/** 一个账号的窗口/余额：footer 片段 + 面板行 + 详情行。used/remaining 已是 0~100 百分比 */
+			const read = (q: any) => {
+				const parts: string[] = [];
+				const rows: QuotaRow[] = [];
+				const details: string[] = [];
+				let maxPercent: number | undefined;
+				for (const w of Array.isArray(q?.windows) ? q.windows : []) {
+					const label = windowLabel(w?.name);
+					if (w?.unlimited === true) {
+						parts.push(`${label} ∞`);
+						rows.push({ text: `${label} ∞` });
+						details.push(`${label} 窗口: 不限量`);
+						continue;
+					}
+					const usedPct = finiteNumber(w?.used);
+					const remainPct = finiteNumber(w?.remaining);
+					// used 缺失时用 remaining 反推；两者都没有就不展示该窗口，不猜数字
+					let used: number | undefined;
+					if (usedPct != null && usedPct >= 0 && usedPct <= 100) used = usedPct;
+					else if (remainPct != null && remainPct >= 0 && remainPct <= 100) used = 100 - remainPct;
+					if (used == null) continue;
+					const at = toResetAt(w?.resetsAt);
+					const text = withReset(`${label} ${Math.round(used)}%`, at);
+					parts.push(text);
+					rows.push({ text, percent: used });
+					maxPercent = Math.max(maxPercent ?? 0, used);
+					const own = typeof w?.display === "string" && w.display.trim() ? `（${w.display.trim()}）` : "";
+					details.push(`${label} 窗口: 已用 ${Math.round(used)}%${own}${resetDetail(at)}`);
+				}
+				const balance = typeof q?.balance === "string" ? q.balance.trim() : "";
+				if (balance) {
+					// 余额自己占一行：右侧面板只渲染 rows，混进 parts 会被丢掉（同 CommandCode）
+					parts.push(balance);
+					rows.push({ text: balance });
+					details.push(`余额: ${balance}`);
+				}
+				return { parts, rows, details, maxPercent };
+			};
+
+			/** magpie 的模型 id 是 `provider/model`；`group` 是路由组，不是上游 provider */
+			const providerOf = (modelId: unknown): string => {
+				const raw = typeof modelId === "string" ? modelId : "";
+				const slash = raw.indexOf("/");
+				const p = slash > 0 ? raw.slice(0, slash) : "";
+				return p === "group" ? "" : p;
+			};
+			const servedModel = typeof route?.route?.model === "string" ? route.route.model : "";
+			const askedModel = info?.modelId ?? "";
+			// 本会话实际走的上游：优先 route 的服务模型，其次当前模型自己的前缀
+			const wanted = providerOf(servedModel) || providerOf(askedModel);
+
+			const all = items.map((q) => ({ q, r: read(q) }));
+			const newest = (list: typeof all) =>
+				[...list].sort(
+					(a, b) => (toResetAt(b.q?.lastServedAt) ?? 0) - (toResetAt(a.q?.lastServedAt) ?? 0),
+				);
+			const mine = wanted ? all.filter((e) => e.q?.provider === wanted) : [];
+			// magpie 是路由器，footer 只能显示一个账号，所以按「本会话实际走的上游」选：
+			//   1) 知道走哪个上游 → 只看它的账号（多账号取 last / 最近服务过的）
+			//   2) 定位不到（还没 route、或模型不是 magpie 的上游）→ 退回全局 last
+			// 选中的账号没有窗口/余额时不拿别的 provider 的数字冒充（见下）
+			let picked = mine.find((e) => e.q?.last === true) ?? newest(mine)[0];
+			// 说清这个账号是怎么定位到的：route 的服务模型 > 当前模型自己的前缀
+			let basis = "";
+			if (picked) basis = servedModel ? `本会话 route: ${servedModel}` : `当前模型 ${askedModel}`;
+			if (!picked && !wanted) {
+				picked =
+					all.find((e) => e.q?.last === true) ??
+					newest(all.filter((e) => e.r.parts.length > 0))[0] ??
+					all[0];
+				if (picked) basis = "未定位到本会话所用账号，按 magpie 最近服务过的显示";
+			}
+			const name = picked ? accountName(picked.q) : "";
+
+			// 其余账号只报它用得最多的那个窗口：一行能扫出「谁快用完了」，不把每个窗口都铺开
+			const others: string[] = [];
+			for (const e of all) {
+				if (e === picked) continue;
+				const hot = e.r.rows.reduce<QuotaRow | undefined>(
+					(a, b) => (b.percent != null && (a == null || b.percent > (a.percent ?? -1)) ? b : a),
+					undefined,
+				);
+				const body = hot ? hot.text : e.r.parts.join("·");
+				others.push(`${accountName(e.q)} ${body || "—"}`);
+			}
+			const othersLine = others.length
+				? `\n  其余 ${others.length} 个账号: ${others.join("；")}`
+				: "";
+
+			let detail = `Magpie${typeof hello.version === "string" ? ` v${hello.version}` : ""}（${host}）`;
+			if (!picked || !picked.r.parts.length) {
+				// 不显示假额度：说清是哪一步断了，也不把别的账号的数字借过来
+				if (askedModel || servedModel)
+					detail += `\n  当前模型: ${servedModel || askedModel}`;
+				if (wanted && !mine.length)
+					detail += `\n  magpie 里没有 ${wanted} 的额度卡`;
+				else if (picked) detail += `\n  ${name} 无可用窗口或余额`;
+				else detail += "\n  magpie 没有可展示的窗口或余额";
+				if (picked && typeof picked.q?.error === "string" && picked.q.error)
+					detail += `\n  ⚠ ${picked.q.error}`;
+				return { seg: null, detail: `${detail}${othersLine}` };
+			}
+
+			const current = picked.q;
+			const cur = picked.r;
+			const KIND_LABELS: Record<string, string> = { subscription: "订阅", plan: "套餐", balance: "余额" };
+			const kindText = [
+				KIND_LABELS[String(current?.kind ?? "")] ?? "",
+				typeof current?.plan === "string" && current.plan.trim() ? current.plan.trim() : "",
+			]
+				.filter(Boolean)
+				.join(" · ");
+			const user = typeof current?.user === "string" && current.user.trim() ? current.user.trim() : "";
+			const readAt = fmtResetClock(toResetAt(current?.readAt));
+			detail += `\n  当前账号: ${name}${kindText ? `（${kindText}）` : ""}${user ? ` · ${user}` : ""}${basis ? ` · ${basis}` : ""}`;
+			for (const line of cur.details) detail += `\n  ${line}`;
+			// 额度是 magpie 的缓存读数，标出它是什么时候读的，别把旧数字当实时
+			if (readAt) detail += `\n  读数: ${readAt}`;
+			if (typeof current?.error === "string" && current.error) detail += `\n  ⚠ ${current.error}`;
+			detail += othersLine;
+			return {
+				seg: { text: `${name} ${cur.parts.join("·")}`, rows: cur.rows, maxPercent: cur.maxPercent },
+				detail,
+			};
+		},
+	},
 ];
 
 /** JSON 存储的原子写缝：先写临时文件再 rename，崩溃不会留半个 JSON。
@@ -1521,6 +1720,8 @@ export default function (pi: ExtensionAPI) {
 		detail: string;
 		fetchedAt: number;
 		inflight: boolean;
+		/** 本次结果对应的模型 id：modelAware 的源靠它判断切模型后要不要立刻重拉 */
+		modelKey?: string;
 		/** 进行中的请求本身，供并发调用方等待同一份结果 */
 		inflightTask?: Promise<void>;
 	}
@@ -1554,6 +1755,26 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	/** 额度是否该重拉：过了 TTL，或 modelAware 的源发现模型换了（不等 TTL） */
+	function quotaExpired(
+		b: QuotaBinding,
+		state: QuotaState | undefined,
+		ctx: ExtensionContext,
+	): boolean {
+		if (!state) return true;
+		if (Date.now() - state.fetchedAt >= b.source.ttlMs) return true;
+		return b.source.modelAware === true && state.modelKey !== ctx.model?.id;
+	}
+
+	/** 当前会话 id：magpie 靠它问 /v1/magpie/route 定位本会话实际走的账号 */
+	function currentSessionId(ctx: ExtensionContext): string | undefined {
+		try {
+			return ctx.sessionManager.getSessionId();
+		} catch {
+			return undefined;
+		}
+	}
+
 	/** 带 TTL 与 inflight 去重的额度拉取；失败静默（保留旧值/空段） */
 	async function refreshQuota(
 		b: QuotaBinding,
@@ -1567,7 +1788,9 @@ export default function (pi: ExtensionAPI) {
 			quotaStates.set(b.providerId, state);
 		}
 		if (state.inflight) return state.inflightTask ?? Promise.resolve();
-		if (!force && Date.now() - state.fetchedAt < b.source.ttlMs) return;
+		if (!force && !quotaExpired(b, state, ctx)) return;
+		// 先记下本次结果的模型：失败时不会因 modelChanged 反复重试
+		state.modelKey = ctx.model?.id;
 		state.inflight = true;
 		state.inflightTask = (async () => {
 			try {
@@ -1575,7 +1798,10 @@ export default function (pi: ExtensionAPI) {
 					? await b.source.resolveApiKey(ctx, b.providerId)
 					: await ctx.modelRegistry.getApiKeyForProvider(b.providerId);
 				if (!apiKey) throw new Error("provider 未配置 API key");
-				const r = await b.source.fetch(b.origin, apiKey);
+				const r = await b.source.fetch(b.origin, apiKey, {
+					modelId: ctx.model?.id,
+					sessionId: currentSessionId(ctx),
+				});
 				state.seg = r.seg;
 				state.detail = r.detail;
 				state.fetchedAt = Date.now();
@@ -2081,7 +2307,7 @@ export default function (pi: ExtensionAPI) {
 				: bindings.find((b) => b.providerId === curProvider);
 		if (active) {
 			const state = quotaStates.get(active.providerId);
-			if (!state || Date.now() - state.fetchedAt >= active.source.ttlMs)
+			if (quotaExpired(active, state, ctx))
 				void refreshQuota(active, ctx, false);
 			if (state?.seg) {
 				const colorOf = (p: number | undefined) => {

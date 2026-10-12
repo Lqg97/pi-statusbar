@@ -170,6 +170,11 @@ for (const scenario of quotaCases) {
 			assert.equal(requests.length, 4);
 			for (const request of requests.slice(1)) assert.equal(request.searchParams.get("orgId"), "test-org");
 		}
+		// magpie：先 /api/hello 认身份，再读额度；带会话 id 时再问 route 定位本会话走的上游
+		if (scenario.source === "Magpie") {
+			assert.deepEqual(requests.map((r) => r.pathname), ["/api/hello", "/v1/magpie/quotas", "/v1/magpie/route"]);
+			assert.equal(requests[2].searchParams.get("session"), "test");
+		}
 		const footer = quota.buildSegments(ctx, theme, footerData, "footer").filter((s) => s.key === "quota");
 		assert.equal(footer.length, 1);
 		assert.equal(footer[0].text, scenario.footer);
@@ -208,9 +213,118 @@ test("unsupported providers and OpenCode Zen do not masquerade as supported quot
 	const { quota } = load();
 	const bases = ["https://api.openai.com/v1", "https://api.x.ai.evil.example/v1",
 		"https://dashscope.aliyuncs.com/compatible-mode/v1", "https://api.lkeap.cloud.tencent.com/plan/v3",
-		"https://radius.example/v1", "https://relay.example/v1", "https://opencode.ai/zen/v1"];
+		"https://radius.example/v1", "https://relay.example/v1", "https://opencode.ai/zen/v1",
+		// 局域网共享的 magpie：要网关 key，不猜（回环才有 /v1/magpie/quotas）
+		"https://magpie.example/v1", "http://192.168.1.5:3425/v1"];
 	quota.resolveQuotaBindings(quotaContext(bases.map((baseUrl, i) => ({ provider: `unsupported-${i}`, baseUrl }))));
 	assert.equal(quota.bindings.length, 0);
+});
+
+test("a loopback port that is not magpie shows no quota and says why", async () => {
+	const { quota } = load("zh", { fetch: async (url) => {
+		assert.equal(url, "http://127.0.0.1:11434/api/hello");
+		return { ok: true, json: async () => ({ name: "ollama" }) };
+	} });
+	const ctx = quotaContext([{ provider: "local", baseUrl: "http://127.0.0.1:11434/v1" }], "local");
+	quota.enable(ctx);
+	// 回环地址不限定端口（magpie 的 port 可改），所以绑定先建立、再由 /api/hello 认身份决定显不显示
+	assert.equal(quota.bindings.length, 1);
+	assert.equal(quota.bindings[0].source.id, "Magpie");
+	await quota.refreshQuota(quota.bindings[0], ctx, true);
+	assert.equal(quota.buildSegments(ctx, theme, footerData, "footer").filter((s) => s.key === "quota").length, 0);
+	assert.match(quota.quotaStates.get("local").detail, /不是 magpie/);
+});
+
+test("Magpie without a route record falls back to the account magpie last served", async () => {
+	const { quotaSources } = load("zh", { fetch: async (url) => {
+		if (new URL(url).pathname === "/api/hello")
+			return { ok: true, json: async () => ({ name: "magpie", version: "0.1.1203" }) };
+		return { ok: true, json: async () => ({ object: "list", data: [
+			{ provider: "claude", name: "Claude Code", kind: "subscription", plan: "pro",
+				windows: [{ name: "5 hours", used: 34, remaining: 66 }, { name: "7 days", remaining: 41 }] },
+			{ provider: "opencode-go", name: "OpenCode Go", kind: "plan", last: true,
+				windows: [{ name: "5 hours", used: 2, remaining: 98 }] },
+			{ provider: "deepseek", name: "deepseek", kind: "balance", balance: "¥116.18", windows: [] },
+		] }) };
+	} });
+	// 没有 info（无模型/会话上下文）：不请求 route，退回全局 last
+	const result = await quotaSources.find((s) => s.id === "Magpie").fetch("http://127.0.0.1:3425", "magpie");
+	assert.equal(result.seg.text, "OpenCode Go 5h 2%");
+	assert.equal(result.seg.maxPercent, 2);
+	assert.deepEqual(Array.from(result.seg.rows, (r) => r.text), ["5h 2%"]);
+	assert.match(result.detail, /当前账号: OpenCode Go（套餐） · 未定位到本会话所用账号/);
+	// 没有 used 的窗口按 100 - remaining 反推；其余账号只报用得最多的那个窗口
+	assert.match(result.detail, /其余 2 个账号: Claude Code 周 59%；deepseek ¥116.18/);
+});
+
+test("Magpie shows the account of the model this session routed to", async () => {
+	const { quotaSources } = load("zh", { fetch: async (url) => {
+		const path = new URL(url).pathname;
+		if (path === "/api/hello")
+			return { ok: true, json: async () => ({ name: "magpie", version: "0.1.1203" }) };
+		if (path === "/v1/magpie/route")
+			return { ok: true, json: async () => ({ route: { asked: "group/auto-k3", model: "kimi-code-cn/k3" } }) };
+		return { ok: true, json: async () => ({ object: "list", data: [
+			{ provider: "opencode-go", name: "OpenCode Go", kind: "plan", last: true,
+				windows: [{ name: "5 hours", used: 6, remaining: 94 }] },
+			{ provider: "kimi-code-cn", name: "Kimi For Coding", kind: "plan",
+				windows: [{ name: "5 hours", used: 0, remaining: 100 }, { name: "7 days", used: 16, remaining: 84 }] },
+		] }) };
+	} });
+	const source = quotaSources.find((s) => s.id === "Magpie");
+	// route 说这轮走了 kimi-code-cn/k3：即使全局 last 仍是 opencode-go，也显示 Kimi
+	const routed = await source.fetch("http://127.0.0.1:3425", "magpie", { modelId: "group/auto-k3", sessionId: "s1" });
+	assert.equal(routed.seg.text, "Kimi For Coding 5h 0%·周 16%");
+	assert.match(routed.detail, /当前账号: Kimi For Coding（套餐） · 本会话 route: kimi-code-cn\/k3/);
+	assert.match(routed.detail, /其余 1 个账号: OpenCode Go 5h 6%/);
+	// 还没 route 记录时按模型 id 的前缀认（kimi-code-cn/k3 → kimi-code-cn）
+	const byModel = await source.fetch("http://127.0.0.1:3425", "magpie", { modelId: "kimi-code-cn/k3" });
+	assert.equal(byModel.seg.text, "Kimi For Coding 5h 0%·周 16%");
+	assert.match(byModel.detail, /当前账号: Kimi For Coding（套餐） · 当前模型 kimi-code-cn\/k3/);
+});
+
+test("Magpie does not borrow another account's numbers when the routed provider has no card", async () => {
+	const { quotaSources } = load("zh", { fetch: async (url) => {
+		if (new URL(url).pathname === "/api/hello")
+			return { ok: true, json: async () => ({ name: "magpie" }) };
+		return { ok: true, json: async () => ({ object: "list", data: [
+			{ provider: "opencode-go", name: "OpenCode Go", kind: "plan", last: true,
+				windows: [{ name: "5 hours", used: 6, remaining: 94 }] },
+		] }) };
+	} });
+	// tencent-cloud 在 magpie 里没有额度卡：不拿 opencode-go 的数字冒充，也不显示额度段
+	const result = await quotaSources.find((s) => s.id === "Magpie").fetch(
+		"http://127.0.0.1:3425", "magpie", { modelId: "tencent-cloud/kimi-k3" });
+	assert.equal(result.seg, null);
+	assert.match(result.detail, /当前模型: tencent-cloud\/kimi-k3/);
+	assert.match(result.detail, /magpie 里没有 tencent-cloud 的额度卡/);
+	assert.doesNotMatch(result.detail, /当前账号/);
+	// 别的账号仍然在详情里可见，只是不当成「当前账号」
+	assert.match(result.detail, /其余 1 个账号: OpenCode Go 5h 6%/);
+});
+
+test("a model switch refetches the model-aware quota source without waiting for the TTL", async () => {
+	let quotaCalls = 0;
+	const { quota } = load("zh", { fetch: async (url) => {
+		const path = new URL(url).pathname;
+		if (path === "/api/hello")
+			return { ok: true, json: async () => ({ name: "magpie", version: "0.1.1203" }) };
+		if (path === "/v1/magpie/route") return { ok: true, json: async () => ({ route: null }) };
+		quotaCalls++;
+		return { ok: true, json: async () => ({ object: "list", data: [
+			{ provider: "kimi-code-cn", name: "Kimi For Coding", kind: "plan", last: true,
+				windows: [{ name: "5 hours", used: 1, remaining: 99 }] },
+		] }) };
+	} });
+	const ctx = quotaContext([{ provider: "magpie", baseUrl: "http://127.0.0.1:3425/v1" }], "magpie");
+	quota.enable(ctx);
+	await quota.refreshQuota(quota.bindings[0], ctx, true);
+	assert.equal(quotaCalls, 1);
+	ctx.model.id = "kimi-code-cn/k3"; // 切模型 → 不等 TTL，立刻重拉
+	await quota.refreshQuota(quota.bindings[0], ctx, false);
+	assert.equal(quotaCalls, 2);
+	await quota.refreshQuota(quota.bindings[0], ctx, false); // 同一模型、TTL 内不再拉
+	assert.equal(quotaCalls, 2);
 });
 
 test("missing API key stays out of the UI and is explained by /statusbar quota", async () => {

@@ -105,4 +105,26 @@ export const quotaCases = [
 		response: { ok: true, currency: "USD", balance: { credit_balance: 20, reserved: 7.66, available: 12.34 }, current_period: { actual_charged: 5 } },
 		footer: "Radius $12.3", rows: ["Radius $12.3"],
 	},
+	{
+		// 本机 magpie 网关：先 /api/hello 认身份，再读额度；route 说本会话这轮走的是 kimi-code-cn/k3，
+		// 所以 footer 跟 route 走（而不是 magpie 全局 last 的 opencode-go）
+		source: "Magpie", baseUrl: "http://127.0.0.1:3425/v1", path: "/api/hello",
+		responses: {
+			"/api/hello": { name: "magpie", version: "0.1.1203" },
+			"/v1/magpie/route": { route: { asked: "kimi-code-cn/k3", model: "kimi-code-cn/k3" }, seq: 7, session: "test" },
+			"/v1/magpie/quotas": { object: "list", data: [
+				{ provider: "opencode-go", name: "OpenCode Go", kind: "plan", last: true,
+					lastServedAt: "2026-10-12T06:53:38Z",
+					windows: [{ name: "5 hours", used: 6, remaining: 94 }, { name: "7 days", used: 2, remaining: 98 }, { name: "Month", used: 15, remaining: 85 }] },
+				{ provider: "kimi-code-cn", name: "Kimi For Coding", kind: "plan",
+					lastServedAt: "2026-10-12T03:03:03Z",
+					windows: [{ name: "5 hours", used: 0, remaining: 100 }, { name: "7 days", used: 16, remaining: 84 }] },
+				{ provider: "claude", name: "Claude Code", kind: "subscription", plan: "pro", user: "ada@example.com",
+					readAt: "2026-10-12T14:32:30+08:00",
+					windows: [{ name: "5 hours", used: 42, remaining: 58 }, { name: "7 days", remaining: 41 }] },
+				{ provider: "deepseek", name: "deepseek", kind: "balance", balance: "¥116.18", windows: [] },
+			] },
+		},
+		footer: "Kimi For Coding 5h 0%·周 16%", rows: ["5h 0%", "周 16%"],
+	},
 ];

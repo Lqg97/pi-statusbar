@@ -36,11 +36,12 @@ main │ ↑12.3k ↓45.6k ⚡100k·85% $0.123 ⏱980ms 128 tok/s │ ▰▰▰�
   | OpenCode Go（opencode.ai/zen/go） | 5h / 周 / 月三窗口已用 % + 恢复倒计时 |
   | MiniMax Coding Plan（minimaxi.com / minimax.io） | 5h / 周窗口已用 % + 恢复倒计时 |
   | Command Code（commandcode.ai） | 5h / 周窗口已用 %（credits 口径）+ 恢复倒计时 + 剩余积分余额 |
+  | magpie（本机网关 127.0.0.1:3425） | 本会话当前模型实际路由到的那个账号的窗口 / 余额：订阅、套餐、按量都行（`GET /v1/magpie/route?session=` 定位，切模型立即重拉）；其余账号在 `/statusbar quota` 详情里逐个带过 |
   | DeepSeek · OpenRouter · Moonshot 开放平台 · SiliconFlow · StepFun · Novita AI | 按量账户余额（按量计费，无重置概念） |
 
   每个窗口用量后括注恢复倒计时（`45s` / `13m` / `2h13m` / `6d4h`：不足 24h 按 `xhyym`，超 24h 按 `xdyyh`，渲染时按重置时刻实时换算，时刻缺失则不显示）；底部单行各窗口用 `·` 连接，右侧面板逐窗口分行。`/statusbar quota` 强制刷新并显示详情（含各窗口「重置于 2026-09-15 15:45（3h56m）」）
 
-  **鉴权与范围**：沿用 Pi 已登录的凭据，不另建登录流程。Copilot 查询使用 Pi 保存的 GitHub OAuth token，而非短期推理 proxy token；GitHub Enterprise 暂不支持。xAI 先验证当前 OAuth 账户，再查询该账户的账单；普通 xAI API key 余额暂不支持，金额从 cents 转为美元，按量消费不冒充订阅窗口。Radius 账单需要当前凭据具备对应权限，余额是组织级数据，不代表个人预算。查询失败、没有 key 或返回未知结构时不显示假额度，可用 `/statusbar quota` 查看原因。
+  **鉴权与范围**：沿用 Pi 已登录的凭据，不另建登录流程。Copilot 查询使用 Pi 保存的 GitHub OAuth token，而非短期推理 proxy token；GitHub Enterprise 暂不支持。xAI 先验证当前 OAuth 账户，再查询该账户的账单；普通 xAI API key 余额暂不支持，金额从 cents 转为美元，按量消费不冒充订阅窗口。Radius 账单需要当前凭据具备对应权限，余额是组织级数据，不代表个人预算。magpie 走它自己的本机接口 `GET /v1/magpie/quotas`（与 `magpie quota --json` 同一份数据），先问 `GET /api/hello` 认身份，因此本机别的服务（vLLM、Ollama…）不会被当成额度源；magpie 的 `port` 改过也认（只匹配回环地址，不限定端口）。显示哪个账号由**当前模型**决定：带会话 id 问 `GET /v1/magpie/route?session=…`（Pi 的 `X-Magpie-Session`）拿本会话这一轮实际被服务的上游模型，取该 provider 的账号；还没有 route 记录时按模型 id 前缀认（`kimi-code-cn/k3` → `kimi-code-cn`）；两者都没有才退回 magpie 全局最近服务过的账号。切模型立即重拉（不等 TTL）。该 provider 在 magpie 里没有额度卡时（如 Tencent Token Plan）不借别的账号的数字，只在详情里说明原因。额度是 magpie 的缓存读数，详情里会标「读数: …」。局域网共享的 magpie（非回环地址）暂不匹配。查询失败、没有 key 或返回未知结构时不显示假额度，可用 `/statusbar quota` 查看原因。
 
   Qwen Token Plan、腾讯 Token Plan 尚未接入：前者的用量查询需要控制台 Cookie/secToken，后者需要云管控鉴权，不能仅凭现有推理 API key 自动查询。不扫描或复制浏览器 Cookie，也不估算订阅剩余额度。
 - **终端标题**：会话名写入终端标题（`pi · 会话名`），不占 footer 宽度（VSCode/Cursor 内置终端看不到时见「排障」）
