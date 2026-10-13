@@ -34,9 +34,15 @@ function load(language = "zh", options = {}) {
 	// Expose private quota helpers only in the compiled test sandbox.
 	const marker = "const quotaStates = new Map();";
 	assert.equal(compiled.split(marker).length, 2);
+	// Expose the split/dock layout surgery: it rewrites pi's component tree, so it needs a test too.
+	const dockMarker = "let splitPanelTheme = null;";
+	assert.equal(compiled.split(dockMarker).length, 2);
 	const instrumented = compiled.replace(marker, `${marker}
 		pi.testQuota = { bindings, quotaStates, resolveQuotaBindings, refreshQuota, buildSegments, enable,
 			createPanel: (theme) => new StatusPanel(theme) };
+	`).replace(dockMarker, `${dockMarker}
+		pi.testDock = { ensureSplit, undockWidgets, findDockableWidgets, docked: () => dockedWidgets,
+			setLayout: (mode) => { layoutMode = mode; }, setActiveTui: (value) => { activeTui = value; } };
 	`);
 	runInNewContext(`${instrumented}\nexports.quotaSources = QUOTA_SOURCES;`, {
 		exports,
@@ -63,10 +69,11 @@ function load(language = "zh", options = {}) {
 		AbortSignal,
 		URL,
 		Buffer,
+		queueMicrotask,
 	});
 	const pi = { registerCommand: (name, command) => commands.set(name, command), on() {}, getThinkingLevel: () => "off" };
 	exports.default(pi);
-	return { commands, reads, quotaSources: exports.quotaSources, quota: pi.testQuota };
+	return { commands, reads, quotaSources: exports.quotaSources, quota: pi.testQuota, dock: pi.testDock };
 }
 
 for (const alias of ["subs", "sub", "subscriptions"]) {
@@ -466,4 +473,107 @@ test("xAI modern OAuth resolver supports in-memory credentials without reading d
 	quota.resolveQuotaBindings(ctx);
 	await quota.refreshQuota(quota.bindings[0], ctx, true);
 	assert.equal(quota.quotaStates.get("xai").seg.text, "xAI 余$10.0");
+});
+
+/**
+ * 复刻 pi 1.2.0 InteractiveMode 的布局树：TUI 上按固定顺序挂 7 个容器，
+ * dock（VStack）里是 pending / status / 上方 widget / editor / 下方 widget / footer。
+ */
+function piLikeTree({ includeAbove = true, includeBelow = true, breakOrder = false } = {}) {
+	const leaf = (name) => ({ render: () => [`[${name}]`] });
+	const document = leaf("document");
+	const pending = leaf("pending");
+	const status = leaf("status");
+	const widgetsAbove = new tui.VStack([]);
+	const editor = new tui.VStack([]);
+	const widgetsBelow = new tui.VStack([]);
+	const footer = leaf("footer");
+	const dockChildren = [pending, status];
+	if (includeAbove) dockChildren.push(widgetsAbove);
+	if (breakOrder) dockChildren.push(widgetsBelow); // 位置对不上：下方容器跑到了 editor 前面
+	dockChildren.push(editor);
+	if (!breakOrder && includeBelow) dockChildren.push(widgetsBelow);
+	dockChildren.push(footer);
+	const dock = new tui.VStack(dockChildren);
+	const root = new tui.VStack([
+		{ component: document, basis: 0, grow: 1, shrink: 1, minSize: 1 },
+		{ component: dock, basis: "auto", grow: 0, shrink: 1, minSize: 1 },
+	]);
+	const tuiStub = {
+		mode: "fullscreen",
+		terminal: { rows: 40, columns: 120 },
+		children: [
+			document,
+			pending,
+			status,
+			includeAbove ? widgetsAbove : leaf("untracked-above"),
+			editor,
+			includeBelow ? widgetsBelow : leaf("untracked-below"),
+			footer,
+		],
+		layoutRoot: root,
+		setLayoutRoot(value) { this.layoutRoot = value; },
+		requestRender() {},
+	};
+	return { tuiStub, root, dock, document, pending, status, widgetsAbove, editor, widgetsBelow, footer };
+}
+
+const dockOrder = (node) => node.entries.map((entry) => entry.component);
+
+test("split docks both widget containers into the right column and restores the dock order", async () => {
+	const { dock } = load();
+	const tree = piLikeTree();
+	dock.setActiveTui(tree.tuiStub);
+	dock.setLayout("split");
+	dock.ensureSplit(tree.tuiStub, theme);
+	await Promise.resolve(); // ensureSplit 在 queueMicrotask 里安装
+	const wrapper = tree.tuiStub.layoutRoot;
+	assert.equal(wrapper.layoutType, "hstack");
+	const right = wrapper.entries[1].component;
+	assert.equal(right.layoutType, "vstack");
+	assert.equal(right.entries.length, 3); // 状态面板 + 上方容器 + 下方容器
+	assert.equal(right.entries[1].component, tree.widgetsAbove);
+	assert.equal(right.entries[2].component, tree.widgetsBelow);
+	assert.equal(dock.docked().length, 2);
+	// 底部 dock 只剩原本不属于 widget 的容器，且 children 与 entries 同步
+	assert.deepEqual(tree.dock.children, [tree.pending, tree.status, tree.editor, tree.footer]);
+	assert.deepEqual(dockOrder(tree.dock), [tree.pending, tree.status, tree.editor, tree.footer]);
+	// 还原：上方容器回 editor 之前、下方容器回 editor 之后
+	dock.undockWidgets(tree.root);
+	assert.deepEqual(tree.dock.children, [tree.pending, tree.status, tree.widgetsAbove, tree.editor, tree.widgetsBelow, tree.footer]);
+	assert.deepEqual(dockOrder(tree.dock), [tree.pending, tree.status, tree.widgetsAbove, tree.editor, tree.widgetsBelow, tree.footer]);
+	assert.equal(dock.docked().length, 0);
+});
+
+test("split docks the below-editor container alone (FleetView keeps its belowEditor default)", async () => {
+	const { dock } = load();
+	const tree = piLikeTree({ includeAbove: false });
+	dock.setActiveTui(tree.tuiStub);
+	dock.setLayout("split");
+	dock.ensureSplit(tree.tuiStub, theme);
+	await Promise.resolve();
+	const right = tree.tuiStub.layoutRoot.entries[1].component;
+	assert.equal(right.layoutType, "vstack");
+	assert.equal(right.entries.length, 2); // 状态面板 + 下方容器
+	assert.equal(right.entries[1].component, tree.widgetsBelow);
+	assert.deepEqual(dockOrder(tree.dock), [tree.pending, tree.status, tree.editor, tree.footer]);
+});
+
+test("split refuses to dock containers whose sibling order pi no longer matches", async () => {
+	const { dock } = load();
+	const tree = piLikeTree({ breakOrder: true });
+	const found = dock.findDockableWidgets(tree.tuiStub, tree.root);
+	// 跨 vm realm 的对象原型不同，逐字段断言而不用 deepEqual
+	assert.equal(found.above, null);
+	assert.equal(found.below, null);
+	dock.setActiveTui(tree.tuiStub);
+	dock.setLayout("split");
+	dock.ensureSplit(tree.tuiStub, theme);
+	await Promise.resolve();
+	assert.equal(dock.docked().length, 0);
+	// 分栏照旧安装，只是右侧只有状态面板，widget 容器原地不动
+	const wrapper = tree.tuiStub.layoutRoot;
+	assert.equal(wrapper.layoutType, "hstack");
+	assert.equal(wrapper.entries[1].component.layoutType, undefined);
+	assert.deepEqual(dockOrder(tree.dock), [tree.pending, tree.status, tree.widgetsAbove, tree.widgetsBelow, tree.editor, tree.footer]);
 });

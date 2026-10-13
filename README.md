@@ -47,7 +47,7 @@ main │ ↑12.3k ↓45.6k ⚡100k·85% $0.123 ⏱980ms 128 tok/s │ ▰▰▰�
 - **终端标题**：会话名写入终端标题（`pi · 会话名`），不占 footer 宽度（VSCode/Cursor 内置终端看不到时见「排障」）
 - **窄终端自适应**：按 扩展状态 → 额度/token → 模型 的顺序逐段收起，仍放不下时整段换行成多行（分支与上下文永不丢弃）
 - **布局可选（layout）**：`bottom` / `right` / `auto` 自动浮层（默认）/ `auto-split` 自动分栏 / `split` 始终分栏，详见「布局」一节
-- **Agent 面板入栏**：分栏布局（`split` / `auto-split`）下把 pi-subagents 的异步 agent 面板搬进右栏（状态卡片下方），点击折叠等交互保留；默认开，`/statusbar dock on|off` 或交互菜单切换
+- **Agent 面板入栏**：分栏布局（`split` / `auto-split`）下把 pi 的「编辑器上方 / 下方」widget 容器（pi-subagents 的异步 agent 面板、FleetView）搬进右栏（状态卡片下方），点击折叠等交互保留；默认开，`/statusbar dock on|off` 或交互菜单切换
 - **指标显隐可配置**：交互式勾选要展示的指标（分支 / 上下文 / 模型 / effort / 用量 / TTFT / 吞吐 / 额度 / 扩展状态），即时预览，保存写回配置文件 `hiddenMetrics` 字段
 - **配置面板中英双语**：`language` 配置项或菜单内 ←→ 实时切换，菜单/指标选择器/提示文案跟随语言
 - **单一命令 `/statusbar`**：无参数打开交互式菜单，集中管理布局、边框、填充、Agent 入栏、语言、指标显隐与启停；也支持子命令快捷方式。新会话默认恢复自定义样式
@@ -111,8 +111,9 @@ pi remove git:github.com/Lqg97/pi-statusbar
  // 分栏面板是否把边框铺满整屏高度：true（默认）/ false（高度贴内容）。
  // 只对分栏布局（split / auto-split）有意义（浮层本来就贴合内容）；也可用 /statusbar fill on|off
  "panelFill": true,
- // split 分栏时把 pi「编辑器上方」的 widget 容器（pi-subagents 的 agent 面板）搬进右栏：
- // 状态面板在上、agent 面板在下，点击折叠等交互保留（默认 true）。
+ // split 分栏时把 pi 的「编辑器上方 / 下方」widget 容器搬进右栏：
+ // 状态面板在上、widget 容器在下，点击折叠等交互保留（默认 true）。
+ // 上方容器装 pi-subagents 的异步 agent 面板；下方容器装 FleetView（fleetViewPlacement 默认 belowEditor）。
  // 入栏期间 panelFill 自动让位（状态面板贴内容）；也可用 /statusbar dock on|off
  "dockWidgetsInSplit": true,
  // 隐藏的指标（可选：branch/ctx/model/effort/usage/ttft/speed/quota/ext），默认 []（全部显示）；
@@ -173,13 +174,21 @@ regular 模式下选 `split` / `auto-split` 不会报错，而是退回底部单
 
 ### Agent 面板入栏（dockWidgetsInSplit，默认开）
 
-`split` 分栏时，把 pi「编辑器上方」的 widget 容器（pi-subagents 的异步 agent 面板就在这里）整体搬进右栏：
+`split` 分栏时，把 pi 的两个 widget 容器（`tui.children[3]`「编辑器上方」与 `tui.children[5]`「编辑器下方」）整体搬进右栏：
 
-- 状态面板在上、agent 面板在下，底部只剩编辑器 + footer
+- 状态面板在上、widget 容器在下，底部只剩编辑器 + footer
+- 上方容器装 pi-subagents 的**异步 agent 面板**；下方容器装 **FleetView**（`fleetViewPlacement` 默认 `belowEditor`）——两边都搬，面板挂哪一侧都能进右栏
 - 鼠标点击折叠等交互按布局位置命中，搬动后照常可用
-- 入栏期间 `panelFill` 自动让位：状态面板贴内容，agent 面板占剩余高度
+- 入栏期间 `panelFill` 自动让位：状态面板贴内容，widget 容器占剩余高度
 - `/statusbar dock on|off` 或交互菜单切换，立即重排
-- 仅分栏布局（`split` / `auto-split`）生效：其余布局（底部单行/浮层）不动布局树，agent 面板仍在底部
+- 仅分栏布局（`split` / `auto-split`）生效：其余布局（底部单行/浮层）不动布局树，widget 容器仍在底部
+- 结构对不上就放弃搬运（容器留在底部），绝不猜：候选必须出现在当前布局树里、且分别是编辑器容器的直接前 / 后兄弟
+
+排障：右栏没有 agent 面板时，先确认**异步**子任务真的在跑——
+
+- 前台子任务（`async: false`，或旧版 pi-subagents 在 Pi 1.2.0 上后台启动失败后被迫退回前台）不写异步 widget，因此面板本来就不会出现
+- pi-subagents ≤ 0.77 在 **Pi 1.2.0** 上后台子任务全部启动失败（`does not provide @earendil-works/chord`）：后台子任务默认开启（`asyncByDefault`），失败后只剩前台单发；升级到 0.78+ 并**重启 pi**（跑着的进程不会换掉已加载的扩展）即可恢复
+- 想把 FleetView 也放进右栏，还可在 `~/.pi/agent/extensions/subagent/config.json` 里设 `{ "fleetViewPlacement": "aboveEditor" }`（本扩展已同时支持下方容器，两处都不设也没问题）
 
 ## 命令
 
@@ -191,7 +200,7 @@ regular 模式下选 `split` / `auto-split` 不会报错，而是退回底部单
 | `/statusbar split [on\|off]` | `layout split` 的快捷别名：`on` = 右侧分栏（`layout split`），`off` = 回到默认布局（`auto`）；不带参数时取反（已是 `split` / `auto-split` 则关掉） |
 | `/statusbar border [auto\|unicode\|ascii]` | 面板边框字符集（写回 `panelBorder` 并立即重绘），不带参数时按 auto → unicode → ascii 循环 |
 | `/statusbar fill [on\|off]` | 分栏面板是否铺满整屏高度（写回 `panelFill` 并立即重绘），不带参数时取反；只对分栏布局（`split` / `auto-split`）生效 |
-| `/statusbar dock [on\|off]` | 分栏布局（`split` / `auto-split`）下把 agent 面板（pi-subagents 的异步任务 widget）搬进右栏（写回 `dockWidgetsInSplit` 并立即重排），不带参数时取反 |
+| `/statusbar dock [on\|off]` | 分栏布局（`split` / `auto-split`）下把 pi 的「编辑器上方 / 下方」widget 容器（异步 agent 面板 / FleetView）搬进右栏（写回 `dockWidgetsInSplit` 并立即重排），不带参数时取反 |
 | `/statusbar metrics` | 直接进入指标显隐交互式配置 |
 | `/statusbar quota` | 强制刷新订阅额度并显示详情 |
 | `/statusbar prices` | 强制刷新实时单价并显示当前模型单价来源 |

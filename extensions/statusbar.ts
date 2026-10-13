@@ -61,8 +61,8 @@
  *                      | "unicode"（┌─┐│└┘）| "ascii"（+ - |）；也可用 /statusbar border [auto|unicode|ascii] 切换
  *     panelFill        分栏面板是否把边框铺满整屏高度（默认 true）；false = 高度贴内容。
  *                      只对 layout=split 有意义（浮层本来就贴合内容）；也可用 /statusbar fill on|off
- *     dockWidgetsInSplit  split 分栏时把 pi「编辑器上方」的 widget 容器（subagent 的 agent 面板）
- *                      搬进右栏：状态面板在上、agent 面板在下（默认 true）。点击折叠等鼠标交互
+ *     dockWidgetsInSplit  split 分栏时把 pi 的「编辑器上方 / 下方」widget 容器（subagent 的异步
+ *                      agent 面板 / FleetView）搬进右栏：状态面板在上、widget 容器在下（默认 true）。点击折叠等鼠标交互
  *                      按布局位置命中，搬动后保留；panelFill 在搬入期间自动让位（面板贴内容）。
  *                      也可用 /statusbar dock on|off；仅 split 生效，其余布局/极窄终端自动回底部
  *     hiddenMetrics    隐藏的指标 key 数组，可选：branch/ctx/model/effort/usage/ttft/speed/quota/ext；
@@ -200,8 +200,8 @@ interface StatusbarConfig {
 	/** 分栏面板是否把边框铺满整屏高度（默认 true）；false = 高度贴内容。
 	 *  只对 layout=split 有效（浮层本来就贴合内容），/statusbar fill on|off 同效 */
 	panelFill: boolean;
-	/** split 分栏时把 pi「编辑器上方」的 widget 容器（subagent 的 agent 面板）搬进右栏（默认 true）；
-	 *  /statusbar dock on|off 同效。仅 split 生效，其余布局自动留在底部 */
+	/** split 分栏时把 pi 的「编辑器上方 / 下方」widget 容器（subagent 的异步 agent 面板、FleetView）
+	 *  搬进右栏（默认 true）；/statusbar dock on|off 同效。仅 split 生效，其余布局自动留在底部 */
 	dockWidgetsInSplit: boolean;
 	/** 隐藏的指标 key 列表（默认全部显示），/statusbar metrics 交互式配置 */
 	hiddenMetrics: MetricKey[];
@@ -647,6 +647,13 @@ function toResetAt(v: unknown): number | undefined {
 	return undefined;
 }
 
+/** 额度窗口的重置时刻：秒级时间戳优先，其次「距今秒数」；都没有则 undefined */
+function resetTimestamp(resetAtSec: number | undefined, afterSec: number | undefined): number | undefined {
+	if (resetAtSec != null && resetAtSec > 0) return resetAtSec * 1000;
+	if (afterSec != null && afterSec >= 0) return Date.now() + afterSec * 1000;
+	return undefined;
+}
+
 /** 恢复倒计时：45s / 13m / 2h13m / 6d4h；时刻缺失或已过期时返回空串 */
 function fmtCountdown(ms: number | undefined): string {
 	if (ms == null || !Number.isFinite(ms)) return "";
@@ -722,27 +729,71 @@ function finiteNumber(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+/** Pi agent 目录：优先运行时 API，其次环境变量，最后 ~/.pi/agent 约定 */
+function resolveAgentDir(): string {
+	if (typeof piAgentRuntime.getAgentDir === "function") return piAgentRuntime.getAgentDir();
+	return process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
+}
+
 /** 只读 Pi 当前凭据；旧版没有公开 getter 时按 Pi agentDir 约定回退，不自行刷新或写 auth.json。 */
 function storedOAuth(providerId: string): Record<string, unknown> | undefined {
 	try {
 		const credential = typeof piAgentRuntime.readStoredCredential === "function"
 			? piAgentRuntime.readStoredCredential(providerId)
-			: JSON.parse(readFileSync(join(
-				typeof piAgentRuntime.getAgentDir === "function" ? piAgentRuntime.getAgentDir()
-					: process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent"),
-				"auth.json",
-			), "utf8"))[providerId];
+			: JSON.parse(readFileSync(join(resolveAgentDir(), "auth.json"), "utf8"))[providerId];
 		return credential?.type === "oauth" ? credential : undefined;
 	} catch {
 		return undefined;
 	}
 }
 
+/** 各额度接口地址与 claim key：命名常量集中放这里，不散落在 fetch 调用里 */
+const OPENAI_AUTH_CLAIM = "https://api.openai.com/auth";
+const CHATGPT_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
+const GITHUB_COPILOT_USER_URL = "https://api.github.com/copilot_internal/user";
+const XAI_USER_URL = "https://cli-chat-proxy.grok.com/v1/user";
+const XAI_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
+const RADIUS_BILLING_URL = "https://radius.pi.dev/v1/billing";
+
+/** 秒数窗口 → 展示标签：604800=周、整天=n天、其余=nh；秒数缺失或非正数用 fallback */
+function secondsWindowLabel(seconds: number | undefined, fallback: string): string {
+	if (seconds === 604800) return "周";
+	if (seconds == null || seconds <= 0) return fallback;
+	if (seconds % 86400 === 0) return `${seconds / 86400}天`;
+	return `${Math.round(seconds / 3600)}h`;
+}
+
+/** Copilot 用量百分比：优先 percent_remaining 反推，其次 entitlement/remaining 绝对值 */
+function copilotUsedPercent(
+	remainingPct: number | undefined,
+	limit: number | undefined,
+	remaining: number | undefined,
+): number | undefined {
+	if (remainingPct != null && remainingPct >= 0 && remainingPct <= 100) return 100 - remainingPct;
+	if (limit == null || limit <= 0 || remaining == null || remaining < 0 || remaining > limit) return undefined;
+	return (1 - remaining / limit) * 100;
+}
+
+/** 比例百分比：优先接口给的 preferredPct，其次 used/limit（封顶 100） */
+function ratioPercent(used: number | undefined, limit: number | undefined, preferredPct?: number): number | undefined {
+	if (preferredPct != null && preferredPct >= 0 && preferredPct <= 100) return preferredPct;
+	if (limit == null || limit <= 0 || used == null) return undefined;
+	return Math.min(100, used / limit * 100);
+}
+
+/** xAI 计费周期 → 展示标签 */
+function xaiPeriodLabel(type: unknown): string {
+	if (type === "WEEKLY") return "周";
+	if (type === "MONTHLY") return "月";
+	return "额度";
+}
+
 /** Codex OAuth JWT 的账户 header；只接受 header-safe 字符，不输出或保存 JWT/账户 ID。 */
 function codexAccountId(token: string): string | undefined {
 	try {
-		const claims = JSON.parse(Buffer.from(token.split(".")[1] ?? "", "base64url").toString("utf8"));
-		const id = claims?.["https://api.openai.com/auth"]?.chatgpt_account_id;
+		const [, payload] = token.split(".");
+		const claims = JSON.parse(Buffer.from(payload ?? "", "base64url").toString("utf8"));
+		const id = claims?.[OPENAI_AUTH_CLAIM]?.chatgpt_account_id;
 		return typeof id === "string" && /^[\x21-\x7e]{1,256}$/.test(id) ? id : undefined;
 	} catch {
 		return undefined;
@@ -759,7 +810,7 @@ const QUOTA_SOURCES: QuotaSource[] = [
 			const headers: Record<string, string> = { Authorization: `Bearer ${apiKey}` };
 			const accountId = codexAccountId(apiKey);
 			if (accountId) headers["ChatGPT-Account-Id"] = accountId;
-			const json = await fetchQuotaJson("https://chatgpt.com/backend-api/wham/usage", headers);
+			const json = await fetchQuotaJson(CHATGPT_USAGE_URL, headers);
 			const rows: QuotaRow[] = [];
 			const details: string[] = [];
 			for (const [window, fallback] of [
@@ -768,20 +819,16 @@ const QUOTA_SOURCES: QuotaSource[] = [
 			] as const) {
 				const pct = finiteNumber(window?.used_percent);
 				if (pct == null || pct < 0 || pct > 100) continue;
-				const seconds = finiteNumber(window?.limit_window_seconds);
-				const label = seconds === 604800 ? "周" : seconds && seconds > 0
-					? seconds % 86400 === 0 ? `${seconds / 86400}天` : `${Math.round(seconds / 3600)}h`
-					: fallback;
-				const reset = finiteNumber(window?.reset_at);
-				const after = finiteNumber(window?.reset_after_seconds);
-				const at = reset && reset > 0 ? reset * 1000
-					: after != null && after >= 0 ? Date.now() + after * 1000 : undefined;
+				const label = secondsWindowLabel(finiteNumber(window?.limit_window_seconds), fallback);
+				const at = resetTimestamp(finiteNumber(window?.reset_at), finiteNumber(window?.reset_after_seconds));
 				rows.push({ text: withReset(`${label} ${Math.round(pct)}%`, at), percent: pct });
 				details.push(`${label} 窗口: 已用 ${Math.round(pct)}%${resetDetail(at)}`);
 			}
 			if (!rows.length) return { seg: null, detail: "Codex 响应中无可用额度窗口" };
+			const percentages = rows.flatMap((r) => r.percent == null ? [] : [r.percent]);
 			return {
-				seg: { text: `Codex ${rows.map((r) => r.text).join("·")}`, rows, maxPercent: Math.max(...rows.map((r) => r.percent!)) },
+				seg: { text: `Codex ${rows.map((r) => r.text).join("·")}`, rows,
+					maxPercent: percentages.length ? Math.max(...percentages) : undefined },
 				detail: `Codex\n  ${details.join("\n  ")}`,
 			};
 		},
@@ -805,7 +852,7 @@ const QUOTA_SOURCES: QuotaSource[] = [
 			return resolved;
 		},
 		async fetch(_origin, apiKey) {
-			const json = await fetchQuotaJson("https://api.github.com/copilot_internal/user", {
+			const json = await fetchQuotaJson(GITHUB_COPILOT_USER_URL, {
 				Authorization: `Bearer ${apiKey}`,
 				"Editor-Version": "vscode/1.107.0",
 				"Editor-Plugin-Version": "copilot-chat/0.35.0",
@@ -819,12 +866,11 @@ const QUOTA_SOURCES: QuotaSource[] = [
 					rows.push({ text: `${label} ∞` });
 					continue;
 				}
-				const remainingPct = finiteNumber(quota?.percent_remaining);
-				const limit = finiteNumber(quota?.entitlement);
-				const remaining = finiteNumber(quota?.remaining);
-				const pct = remainingPct != null && remainingPct >= 0 && remainingPct <= 100
-					? 100 - remainingPct : limit != null && limit > 0 && remaining != null && remaining >= 0 && remaining <= limit
-						? (1 - remaining / limit) * 100 : undefined;
+				const pct = copilotUsedPercent(
+					finiteNumber(quota?.percent_remaining),
+					finiteNumber(quota?.entitlement),
+					finiteNumber(quota?.remaining),
+				);
 				if (pct == null) continue;
 				rows.push({ text: withReset(`${label} ${Math.round(pct)}%`, at), percent: pct });
 			}
@@ -861,10 +907,10 @@ const QUOTA_SOURCES: QuotaSource[] = [
 				"x-grok-client-identifier": "pi-statusbar",
 			};
 			// 仅从本次认证 /user 的返回取 transient ID，不用 JWT、用户配置或持久化身份。
-			const user = await fetchQuotaJson("https://cli-chat-proxy.grok.com/v1/user", headers);
+			const user = await fetchQuotaJson(XAI_USER_URL, headers);
 			if (typeof user?.userId !== "string" || !/^[\x21-\x7e]{1,256}$/.test(user.userId))
 				throw new Error("无法确认 xAI 账户身份，未查询账单");
-			const json = await fetchQuotaJson("https://cli-chat-proxy.grok.com/v1/billing?format=credits", {
+			const json = await fetchQuotaJson(XAI_BILLING_URL, {
 				...headers, "x-userid": user.userId,
 			});
 			const config = json?.config ?? json;
@@ -876,13 +922,12 @@ const QUOTA_SOURCES: QuotaSource[] = [
 			const limit = cents(config?.monthlyLimit);
 			const used = cents(config?.used);
 			const creditPct = finiteNumber(config?.creditUsagePercent);
-			const pct = creditPct != null && creditPct >= 0 && creditPct <= 100 ? creditPct
-				: limit != null && limit > 0 && used != null ? Math.min(100, used / limit * 100) : undefined;
+			const pct = ratioPercent(used, limit, creditPct);
 			const at = toResetAt(config?.currentPeriod?.end ?? config?.billingPeriodEnd);
 			const rows: QuotaRow[] = [];
 			const details: string[] = [];
 			if (pct != null) {
-				const label = config?.currentPeriod?.type === "WEEKLY" ? "周" : config?.currentPeriod?.type === "MONTHLY" ? "月" : "额度";
+				const label = xaiPeriodLabel(config?.currentPeriod?.type);
 				rows.push({ text: withReset(`${label} ${Math.round(pct)}%`, at), percent: pct });
 				details.push(`订阅已用 ${Math.round(pct)}%${resetDetail(at)}`);
 			}
@@ -913,7 +958,7 @@ const QUOTA_SOURCES: QuotaSource[] = [
 		ttlMs: 5 * 60_000,
 		async fetch(_origin, apiKey) {
 			// 官方 live accounting 接口，不把预算总额、reserved 或历史充值当作可用余额。
-			const json = await fetchQuotaJson("https://radius.pi.dev/v1/billing", { Authorization: `Bearer ${apiKey}` });
+			const json = await fetchQuotaJson(RADIUS_BILLING_URL, { Authorization: `Bearer ${apiKey}` });
 			const available = finiteNumber(json?.balance?.available);
 			if (json?.ok !== true || json?.currency !== "USD" || available == null)
 				return { seg: null, detail: "Radius 响应中无可用 USD 余额（可能缺少账单权限）" };
@@ -2398,9 +2443,9 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 			// 分栏模式：panelFill 时补满到视口高度（上下边框各占 1 行），超出部分由布局层裁切；
-			// agent 面板入栏（dockedWidget）时让位给内容高度，否则填满的面板会把 agent 面板挤出屏
+			// agent 面板入栏（dockedWidgets）时让位给内容高度，否则填满的面板会把 agent 面板挤出屏
 			const target =
-				this.heightOf && config.panelFill && !dockedWidget
+				this.heightOf && config.panelFill && !dockedWidgets.length
 					? Math.max(1, this.heightOf() - 2)
 					: 0;
 			while (target > 0 && body.length < target) row("");
@@ -2485,12 +2530,16 @@ export default function (pi: ExtensionAPI) {
 	/** visible 回调每帧记录整个视口宽度：分栏下 footer 收到的宽度已扣掉侧栏，不能再当归属判据 */
 	let splitViewportW = 0;
 
-	/** split 下被搬进右栏的 widget 容器（pi「编辑器上方」的 widget dock，subagent 的 agent 面板就挂在这里） */
-	let dockedWidget: {
+	/** split 下被搬进右栏的 widget 容器：pi 的「编辑器上方」「编辑器下方」两个 dock。
+	 *  上方 = pi-subagents 的异步 agent 面板；下方 = FleetView（`fleetViewPlacement` 默认 belowEditor）。
+	 *  两边都搬，agent 面板挂哪一侧都能进右栏 */
+	let dockedWidgets: {
+		/** 在原 dock 里相对编辑器容器的位置，还原时按它插回 */
+		slot: "above" | "below";
 		container: Component;
 		/** 当前所在的父容器（右栏 VStack），重建/还原时先摘下 */
 		curParent: { removeChild(c: Component): void } | null;
-	} | null = null;
+	}[] = [];
 
 	/** 布局树里的父容器（pi 的 dock 是 VStack，entries 与 children 同序对应） */
 	type ContainerParent = {
@@ -2518,33 +2567,40 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/**
-	 * pi 的「编辑器上方」widget 容器（subagent 的 agent 面板挂在这里）。
-	 * 识别依据：InteractiveMode 按固定顺序把 7 个容器 addChild 到 TUI，children[3] 即它；
-	 * 再要求它确实出现在当前布局树里、且是编辑器容器（children[4]）的前一个兄弟。
+	 * pi 的「编辑器上方 / 下方」widget 容器（subagent 的异步面板 / FleetView 挂在这里）。
+	 * 识别依据：InteractiveMode 按固定顺序把 7 个容器 addChild 到 TUI ——
+	 * children[3] = 上方 widget 容器、children[4] = 编辑器容器、children[5] = 下方 widget 容器；
+	 * 再要求候选确实出现在当前布局树里、且分别是编辑器容器的直接前 / 后兄弟。
 	 * 结构对不上就放弃搬运（dock 留在底部），绝不猜。
 	 */
-	function findWidgetsAbove(tui: TUI, core: Component): Component | null {
-		const candidate = tui.children?.[3];
-		const editor = tui.children?.[4];
-		if (
-			!candidate ||
-			typeof candidate.render !== "function" ||
-			!Array.isArray((candidate as { children?: unknown }).children)
-		)
-			return null;
-		if (!findContainerParent(core, candidate)) return null;
-		// 结构校验：候选必须是编辑器容器的直接前兄弟（pi dock 的固定顺序）
-		if (editor) {
-			const dock = findContainerParent(core, editor);
-			const dc = dock?.children;
+	function findDockableWidgets(
+		tui: TUI,
+		core: Component,
+	): { above: Component | null; below: Component | null } {
+		const pick = (index: number): Component | null => {
+			const candidate = tui.children?.[index];
 			if (
-				!dc ||
-				dc.indexOf(editor) < 1 ||
-				dc[dc.indexOf(editor) - 1] !== candidate
+				!candidate ||
+				typeof candidate.render !== "function" ||
+				!Array.isArray((candidate as { children?: unknown }).children)
 			)
 				return null;
-		}
-		return candidate;
+			if (!findContainerParent(core, candidate)) return null;
+			return candidate;
+		};
+		const above = pick(3);
+		const below = pick(5);
+		// 结构校验：候选必须是编辑器容器的直接前 / 后兄弟（pi dock 的固定顺序）
+		const editor = tui.children?.[4];
+		if (!editor) return { above, below };
+		const dc = findContainerParent(core, editor)?.children;
+		if (!dc) return { above: null, below: null };
+		const at = dc.indexOf(editor);
+		if (at < 0) return { above: null, below: null };
+		return {
+			above: above && dc[at - 1] === above ? above : null,
+			below: below && dc[at + 1] === below ? below : null,
+		};
 	}
 
 	/**
@@ -2553,13 +2609,15 @@ export default function (pi: ExtensionAPI) {
 	 * reload / 模式切换后旧布局树被丢弃也能正确归位。
 	 */
 	function undockWidgets(core: Component | null): void {
-		const d = dockedWidget;
-		dockedWidget = null;
-		if (!d) return;
-		try {
-			d.curParent?.removeChild(d.container);
-		} catch {
-			// 旧父容器可能已废弃，忽略
+		const entries = dockedWidgets;
+		dockedWidgets = [];
+		if (!entries.length) return;
+		for (const d of entries) {
+			try {
+				d.curParent?.removeChild(d.container);
+			} catch {
+				// 旧父容器可能已废弃，忽略
+			}
 		}
 		try {
 			const tui = activeTui;
@@ -2567,15 +2625,23 @@ export default function (pi: ExtensionAPI) {
 			const root = core ?? (tui ? asLayoutRootHost(tui).layoutRoot : undefined);
 			const dock = editor && root ? findContainerParent(root, editor) : null;
 			if (!dock || !editor) return;
-			const idx = Math.max(0, dock.children.indexOf(editor));
-			dock.children.splice(idx, 0, d.container);
-			// Stack 的排版走 entries，必须同步插回（pi 给 widgetsAbove 的原始参数是 shrink:1, minSize:0）
-			if (Array.isArray(dock.entries))
-				dock.entries.splice(idx, 0, {
-					component: d.container,
-					shrink: 1,
-					minSize: 0,
-				});
+			// pi dock 的顺序：… 上方 widget 容器 / editor / 下方 widget 容器 …
+			// 先插下方（紧跟 editor），再插上方（editor 之前），插完顺序与 pi 的原始顺序一致
+			for (const slot of ["below", "above"] as const) {
+				for (const d of entries) {
+					if (d.slot !== slot) continue;
+					const idx = Math.max(0, dock.children.indexOf(editor)) + (slot === "below" ? 1 : 0);
+					dock.children.splice(idx, 0, d.container);
+					// Stack 的排版走 entries，必须同步插回
+					//（pi 给 widgetsAbove/Below 的原始参数是 shrink:1, minSize:0）
+					if (Array.isArray(dock.entries))
+						dock.entries.splice(idx, 0, {
+							component: d.container,
+							shrink: 1,
+							minSize: 0,
+						});
+				}
+			}
 			dock.invalidate?.();
 		} catch {
 			// 结构变了就让它留在原处，最多少一块显示，不崩
@@ -2648,47 +2714,49 @@ export default function (pi: ExtensionAPI) {
 				}
 				const panel = splitPanel;
 
-				// 把 pi「编辑器上方」的 widget 容器（subagent 的 agent 面板）搬入右栏：
-				// 状态面板在上、agent 面板在下。fullscreen 下鼠标按布局位置命中，
+				// 把 pi 的「编辑器上方 / 下方」widget 容器（subagent 的异步 agent 面板、FleetView）搬入右栏：
+				// 状态面板在上、widget 容器在下。fullscreen 下鼠标按布局位置命中，
 				// 点击折叠等交互不受影响；结构对不上时静默放弃（留在底部）
 				const dockAllowed = config.dockWidgetsInSplit;
-				if (!dockAllowed && dockedWidget) undockWidgets(core);
+				if (!dockAllowed && dockedWidgets.length) undockWidgets(core);
 				let rightSide: Component = panel;
 				if (
 					dockAllowed &&
 					typeof piTuiRuntime.VStack === "function"
 				) {
-					// 重建路径（改宽度 / reload 后重包）：先从旧的右栏摘下
-					if (dockedWidget?.curParent) {
+					// 重建路径（改宽度 / reload 后重包）：先把已入栏的容器从旧右栏摘下
+					for (const d of dockedWidgets) {
 						try {
-							dockedWidget.curParent.removeChild(dockedWidget.container);
+							d.curParent?.removeChild(d.container);
 						} catch {
 							// 旧父容器已废弃，忽略
 						}
-						dockedWidget.curParent = null;
+						d.curParent = null;
 					}
-					if (!dockedWidget) {
-						const w = findWidgetsAbove(tui, core);
-						const home = w ? findContainerParent(core, w) : null;
-						if (w && home) {
+					if (!dockedWidgets.length) {
+						const found = findDockableWidgets(tui, core);
+						for (const slot of ["above", "below"] as const) {
+							const w = found[slot];
+							const home = w ? findContainerParent(core, w) : null;
+							if (!w || !home) continue;
 							home.removeChild(w);
-							dockedWidget = { container: w, curParent: null };
+							dockedWidgets.push({ slot, container: w, curParent: null });
 						}
 					}
-					if (dockedWidget) {
+					if (dockedWidgets.length) {
 						const col = new piTuiRuntime.VStack([
 							// panel 取自然高度（docked 时 panelFill 自动让位，见 StatusPanel）
 							{ component: panel, basis: "auto", grow: 0, shrink: 1, minSize: 0 },
-							// agent 面板吃掉剩余高度：内容少时底部留白，内容多时由布局层裁切
-							{
-								component: dockedWidget.container,
-								basis: "auto",
+							// agent 面板 / FleetView 吃掉剩余高度：内容少时底部留白，内容多时由布局层裁切
+							...dockedWidgets.map((d) => ({
+								component: d.container,
+								basis: "auto" as const,
 								grow: 1,
 								shrink: 1,
 								minSize: 0,
-							},
+							})),
 						]);
-						dockedWidget.curParent = col;
+						for (const d of dockedWidgets) d.curParent = col;
 						rightSide = col;
 					}
 				}
@@ -3415,7 +3483,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/**
-	 * 切换 split 下是否把 agent 面板（pi「编辑器上方」widget 容器）搬进右栏。
+	 * 切换 split 下是否把 agent 面板 / FleetView（pi 的「编辑器上方 / 下方」widget 容器）搬进右栏。
 	 * 写回配置；分栏已装好时会拆掉重装（搬入/还原立即生效），其余布局记住设置即可。
 	 */
 	function setDockWidgets(
