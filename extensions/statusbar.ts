@@ -45,7 +45,18 @@
  *   且不再创建浮层（浮层会挡住 /settings 切换 TUI mode）；auto-split 在 regular 模式下
  *   会像 split 一样自动把 pi 的 tuiMode 补成 fullscreen（提示重启），本次会话仍走底部单行；
  *   /statusbar 无参数打开交互式菜单（布局 ◀▶ 调值 / 面板边框 / 指标显隐 / 启停；Enter 确认，Esc 退出），
- *   或子命令快捷方式：/statusbar [on|off] | layout [right|bottom|auto|auto-split|split] | split [on|off] | metrics
+ *   或子命令快捷方式：/statusbar [on|off] | layout [right|bottom|auto|auto-split|split] | split [on|off]
+ *   | border [auto|unicode|ascii] | fill [on|off] | dock [on|off] | focus [<路径>|cwd|auto|clear] | metrics
+ * - 工作焦点（focus）：展示「用户要求你工作的那个仓库」，可能不同于 cwd。
+ *   场景：cwd 是多仓工作区根（如 ~/CodeBuddy/harness，本身不是 git 仓库），用户在对话里要求只改
+ *   其中一个仓库 —— 此时分支段显示 `pi-statusbar (main) ·harness`（仓库(分支) accent，cwd 暗色后缀），
+ *   而不是把工作区根名当“分支”显示。
+ *   来源优先级：/statusbar focus <路径> 手动钉住 > 按工具触碰自动推断 > cwd 默认。
+ *   自动推断：edit/write 立即抢占（最强信号），read/ls/grep/find 只在尚无焦点时生效（不抢占）；
+ *   焦点 = cwd 所属仓库时完全保持旧外观（只显示分支名）。
+ *   钉住的焦点写入 session 分支（appendEntry customType=statusbar:focus），续接会话时恢复。
+ *   同时注册只读工具 get_work_focus，让模型能问到当前焦点（路径/仓库/分支/来源）。
+ *   注意：焦点信息**不写进系统提示词** —— 见 README「工作焦点」一节的缓存说明。
  * - 新会话默认恢复自定义样式
  * - 用户配置 ~/.pi/agent/statusbar.json（环境变量 PI_STATUSBAR_CONFIG 可覆盖路径）：
  *     priceMap         本地模型 → models.dev 单价映射，key 为 "provider:model" 或裸 "model"
@@ -79,6 +90,9 @@ import type {
 	ModelCost,
 	ModelCostRates,
 } from "@earendil-works/pi-ai";
+// 命名空间导入 TypeBox 的 Type：极旧版 pi-ai 缺这个导出时只会取到 undefined，
+// 于是跳过 get_work_focus 的注册，而不是在扩展加载期抛链接错误（与本文件其他命名空间导入同因）
+import * as piAiRuntime from "@earendil-works/pi-ai";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
@@ -99,10 +113,11 @@ import {
 	type Component,
 	type TUI,
 } from "@earendil-works/pi-tui";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { mkdirSync, renameSync } from "node:fs";
+import { execFile } from "node:child_process";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 /** 会话累计用量 */
 interface UsageStats {
@@ -235,7 +250,7 @@ type MetricKey =
 	| "ext";
 
 const METRICS: { key: MetricKey; zh: string; en: string }[] = [
-	{ key: "branch", zh: "分支 / 目录", en: "Branch / Dir" },
+	{ key: "branch", zh: "分支 / 工作目录", en: "Branch / Work dir" },
 	{ key: "ctx", zh: "上下文占用", en: "Context usage" },
 	{ key: "model", zh: "模型名", en: "Model" },
 	{
@@ -1753,6 +1768,257 @@ export default function (pi: ExtensionAPI) {
 	let priceSource = "models.json";
 	let priceInflight = false;
 
+	// ---------- 工作焦点（focus）：展示「用户要求你工作的仓库」，可能不同于 cwd ----------
+	// 场景：cwd 是多仓工作区根（如 ~/CodeBuddy/harness），用户在对话里要求只改其中某个仓库，
+	// 此时状态栏该显示那个仓库与它的分支，而不是 cwd 的目录名。
+	// 设计约束：焦点信息绝不写进系统提示词（每次改写都会整体失效 prompt 前缀缓存，
+	// 见 README「工作焦点」一节）；只做 footer 展示 + 一个只读工具 get_work_focus。
+
+	/** 焦点来源：pinned（手动钉住）/ auto（按工具触碰推断）/ cwd（默认） */
+	type FocusSource = "pinned" | "auto" | "cwd";
+
+	interface GitInfo {
+		/** 仓库根（worktree 下是该 worktree 的根）；非 git 目录时缺省 */
+		root?: string;
+		/** 当前分支；detached HEAD 时是短 sha */
+		branch?: string;
+	}
+
+	interface FocusSnapshot {
+		/** 有效焦点目录（可能是仓库内的子目录或非 git 目录） */
+		path: string;
+		/** 展示名：仓库根（或焦点目录）的 basename */
+		name: string;
+		root?: string;
+		branch?: string;
+		/** 焦点是否就是 cwd 所属的仓库/目录 —— 是则保持旧外观（只显示分支名） */
+		sameAsCwd: boolean;
+		source: FocusSource;
+	}
+
+	/** git 探测结果的缓存 TTL：footer 渲染绝不 spawn 进程，只在事件里异步刷新 */
+	const GIT_TTL_MS = 2000;
+	const gitCache = new Map<string, { at: number; info: GitInfo }>();
+	const gitInflight = new Map<string, Promise<GitInfo>>();
+
+	/** 取路径自身（若是目录）或最近的已存在祖先目录：写新文件时 git -C 也需要一个真实目录 */
+	function nearestDir(p: string): string {
+		let cur = p;
+		for (;;) {
+			try {
+				return statSync(cur).isDirectory() ? cur : dirname(cur);
+			} catch {
+				// 不存在：继续往上找
+			}
+			const up = dirname(cur);
+			if (up === cur) return p; // 到根了，交给 git 自己失败
+			cur = up;
+		}
+	}
+
+	/**
+	 * 探测目录所属仓库与分支：execFile（无 shell）1.5s 超时，按目录去重 + TTL 缓存。
+	 * 分两步而不是一条 `rev-parse --show-toplevel --abbrev-ref HEAD`：后者在**未出生分支**
+	 * （git init 后还没提交、checkout --orphan）上会报错，整条命令随之失败，仓库根也一起丢掉。
+	 * symbolic-ref 对普通/未出生分支都给分支名，detached HEAD 时为空 → 再补短 sha。
+	 */
+	function probeGit(dir: string): Promise<GitInfo> {
+		const target = nearestDir(dir);
+		const hit = gitCache.get(target);
+		if (hit && Date.now() - hit.at < GIT_TTL_MS) return Promise.resolve(hit.info);
+		const flying = gitInflight.get(target);
+		if (flying) return flying;
+		/** 跑一条 git 子命令；失败（非仓库、无 HEAD…）当作空串，由调用方决定怎么回落 */
+		const git = (args: string[]): Promise<string> =>
+			new Promise((resolve) => {
+				execFile(
+					"git",
+					["-C", target, ...args],
+					{ timeout: 1500, windowsHide: true },
+					(err, stdout) => resolve(err ? "" : String(stdout ?? "").trim()),
+				);
+			});
+		const task = (async (): Promise<GitInfo> => {
+			const root = await git(["rev-parse", "--show-toplevel"]);
+			if (!root) return {}; // 非 git 目录（或裸仓库：没有工作区可展示）
+			const branch =
+				(await git(["symbolic-ref", "--short", "-q", "HEAD"])) ||
+				(await git(["rev-parse", "--short", "HEAD"])); // detached HEAD：短 sha
+			return { root, branch: branch || undefined };
+		})().then((info) => {
+			gitCache.set(target, { at: Date.now(), info });
+			gitInflight.delete(target);
+			return info;
+		});
+		gitInflight.set(target, task);
+		return task;
+	}
+
+	/** 手动钉住的目录（会话内有效，用 appendEntry 持久化）；null = 跟随自动推断 */
+	let pinnedDir: string | null = null;
+	/** 自动推断出的仓库根（最近被 edit/write 触碰的那个） */
+	let autoRoot: string | null = null;
+	/** cwd 所属仓库根；cwd 不是仓库时等于 cwd。会话起手探一次 */
+	let cwdRoot: string | undefined;
+	/** 渲染只读这份快照；undefined = 尚未就绪，此时完全退回旧行为 */
+	let focusCache: FocusSnapshot | undefined;
+	/** 刷新世代号：只让最新一次刷新的结果落地（见 refreshFocusNow） */
+	let focusGen = 0;
+	/**
+	 * 最近一次焦点推断任务。get_work_focus 会先等它落地：pi 会先把一批工具的全部 tool_call
+	 * 事件派发（并 await）完，再并发执行这批次（agent-loop 的 executeToolCallsParallel），
+	 * 所以同一批里的 read/edit 已经登记了触碰路径、只是 git 探测还在跑 —— 不等就会读到“上一批”的焦点。
+	 */
+	let lastTouchTask: Promise<void> = Promise.resolve();
+
+	const focusDir = (ctx?: ExtensionContext): string =>
+		pinnedDir ?? autoRoot ?? ctx?.cwd ?? currentCtx?.cwd ?? process.cwd();
+	const focusSource = (): FocusSource => {
+		if (pinnedDir) return "pinned";
+		return autoRoot ? "auto" : "cwd";
+	};
+
+	/**
+	 * cwd 所属仓库根（只探一次）。必须走 git 的返回值而不是直接用 ctx.cwd：git 给的是**规范路径**，
+	 * 能吸收 /tmp → /private/tmp（macOS）、软链的 home 目录这类拼写差异，否则同一个仓库会因为
+	 * 字面路径不同而被当成两个仓库（显示成 `pi-statusbar main ·pi-statusbar`）。
+	 */
+	async function ensureCwdRoot(ctx: ExtensionContext): Promise<string> {
+		if (cwdRoot === undefined) cwdRoot = (await probeGit(ctx.cwd)).root ?? ctx.cwd;
+		return cwdRoot;
+	}
+
+	/** 按当前有效焦点算一份快照（会 spawn git；只在事件/命令里调，渲染路径不调） */
+	async function buildFocusSnapshot(ctx: ExtensionContext): Promise<FocusSnapshot> {
+		const dir = focusDir(ctx);
+		const [info, cwdRepo] = await Promise.all([probeGit(dir), ensureCwdRoot(ctx)]);
+		const root = info.root ?? dir;
+		return {
+			path: dir,
+			name: basename(root) || dir,
+			root: info.root,
+			branch: info.branch,
+			sameAsCwd: root === cwdRepo,
+			source: focusSource(),
+		};
+	}
+
+	/**
+	 * 异步刷新焦点快照并请求重绘；渲染路径永远不调用 git。
+	 * 快照带世代号：连着改两次焦点（`focus X` 后马上 `focus clear`）时，先发出的探测可能后回来，
+	 * 没过世代号就会用旧结果覆盖新状态（footer 停在已取消的仓库上）。
+	 */
+	async function refreshFocusNow(ctx: ExtensionContext): Promise<FocusSnapshot> {
+		const gen = ++focusGen;
+		const snapshot = await buildFocusSnapshot(ctx);
+		if (gen === focusGen) applyFocus(snapshot);
+		return snapshot;
+	}
+
+	function applyFocus(snapshot: FocusSnapshot): void {
+		focusCache = snapshot;
+		activeTui?.requestRender();
+	}
+
+	function refreshFocus(ctx: ExtensionContext): void {
+		void refreshFocusNow(ctx);
+	}
+
+	/**
+	 * 记录一次工具触碰的路径：edit/write（strong）立即抢占焦点；read/ls/grep/find 等弱信号
+	 * 只在尚无焦点时生效，避免代理顺手读别的仓库就把焦点带跑。
+	 * 返回是否改变了有效焦点（测试可直接 await）。
+	 */
+	async function noteTouchedPath(
+		ctx: ExtensionContext,
+		rawPath: string,
+		strong: boolean,
+	): Promise<boolean> {
+		if (pinnedDir) return false; // 手动钉住优先，自动推断不参与
+		const dir = isAbsolute(rawPath) ? rawPath : resolve(ctx.cwd, rawPath);
+		const [info, cwdRepo] = await Promise.all([probeGit(dir), ensureCwdRoot(ctx)]);
+		if (!info.root) return false; // 非 git 路径（如工作区根里的散文件）不改变焦点
+		if (info.root === cwdRepo) {
+			if (autoRoot === null) return false;
+			autoRoot = null; // 又回到 cwd 自己的仓库：恢复默认显示
+			refreshFocus(ctx);
+			return true;
+		}
+		if (autoRoot === info.root) return false;
+		if (!strong && autoRoot) return false; // 弱信号不抢占已有焦点
+		autoRoot = info.root;
+		refreshFocus(ctx);
+		return true;
+	}
+
+	/** 回放时最多回看的 assistant 消息条数：避免每次会话起手扫描整个长 transcript */
+	const SEED_SCAN = 400;
+
+	/** 带路径的工具调用里取路径（read/edit/write/ls/grep/find 的参数名都是 path） */
+	function touchedPathOf(name: string, args: Record<string, unknown> | undefined): string | undefined {
+		if (
+			name !== "read" &&
+			name !== "edit" &&
+			name !== "write" &&
+			name !== "ls" &&
+			name !== "grep" &&
+			name !== "find"
+		)
+			return undefined;
+		const path = args?.path;
+		return typeof path === "string" && path ? path : undefined;
+	}
+
+	/**
+	 * 从 transcript 回放出一个“焦点种子”。重启/续接会话时扩展内存是空的，不回放的话状态栏就
+	 * 退回 cwd —— 即使这个会话一直在别的仓库里干活（用户视角就是“重启后忘了我在哪工作”）。
+	 * 规则与实时推断对齐：最近的 edit/write 优先；没有 edit/write 才用最近的读取类调用。
+	 */
+	function seededTouch(ctx: ExtensionContext): string | undefined {
+		try {
+			const branch = ctx.sessionManager.getBranch();
+			let weak: string | undefined;
+			let scanned = 0;
+			for (let i = branch.length - 1; i >= 0 && scanned < SEED_SCAN; i--) {
+				const entry = branch[i];
+				if (entry.type !== "message") continue;
+				const message = entry.message as AssistantMessage;
+				if (message.role !== "assistant") continue;
+				scanned++;
+				for (const block of message.content ?? []) {
+					if (block.type !== "toolCall") continue;
+					const path = touchedPathOf(block.name, block.arguments);
+					if (!path) continue;
+					if (block.name === "edit" || block.name === "write") return path;
+					weak ??= path;
+				}
+			}
+			return weak;
+		} catch {
+			// transcript 结构异常时静默放弃，退回 cwd 行为
+			return undefined;
+		}
+	}
+
+	/** 焦点详情文本（/statusbar focus 与 get_work_focus 共用） */
+	function focusDetail(ctx: ExtensionContext): string {
+		const f = focusCache;
+		const dir = f?.path ?? focusDir(ctx);
+		const src: Record<FocusSource, string> = {
+			pinned: "手动钉住",
+			auto: "自动推断（最近被改动的仓库）",
+			cwd: "默认（跟随 cwd）",
+		};
+		return [
+			`cwd: ${ctx.cwd}`,
+			`焦点目录: ${dir}`,
+			f?.root ? `仓库根: ${f.root}` : "仓库根: （非 git 目录）",
+			`分支: ${f?.branch ?? "（未知）"}`,
+			`来源: ${src[f?.source ?? focusSource()]}`,
+			f && !f.sameAsCwd ? "与 cwd 不是同一个仓库" : "与 cwd 同一仓库（状态栏外观不变）",
+		].join("\n");
+	}
+
 	// ---------- 订阅额度 ----------
 
 	interface QuotaBinding {
@@ -2180,22 +2446,57 @@ export default function (pi: ExtensionAPI) {
 	): Segment[] {
 		const segs: Segment[] = [];
 
-		// git 分支；非 git 目录（如多仓工作区根）时回退显示当前目录名
-		const branch = footerData.getGitBranch();
-		if (branch) {
+		// 工作焦点优先：cwd 是多仓工作区根（非 git 目录）时，展示「你要求工作的那个仓库」
+		// 焦点 = cwd 所属仓库时完全保持旧外观；渲染只读 focusCache / footerData，不做 git 调用
+		const cwdName = basename(ctx.cwd) || ctx.cwd;
+		const f = focusCache;
+		if (f?.branch && f.sameAsCwd) {
 			segs.push({
 				label: "Branch",
-				text: theme.fg("accent", branch),
+				text: theme.fg("accent", f.branch),
+				pri: 0,
+				key: "branch",
+			});
+		} else if (f?.branch) {
+			// 仓库名与分支合成一个值：`pi-statusbar (main)`；footer 再暗色附上 cwd。
+			// label 硬编码英文：面板里所有段落 label（Branch/Dir/Ctx/Model/Quota…）都是英文，
+			// config.language 只管配置菜单文案，不跟着变
+			const focus = `${f.name} (${f.branch})`;
+			segs.push({
+				label: "Focus",
+				text:
+					variant === "panel"
+						? theme.fg("accent", focus)
+						: theme.fg("accent", focus) + theme.fg("dim", ` ·${cwdName}`),
+				pri: 0,
+				key: "branch",
+			});
+		} else if (f && !footerData.getGitBranch()) {
+			// 焦点不是 git 目录（可能是手动钉住的普通目录）
+			segs.push({
+				label: "Dir",
+				text: theme.fg("muted", f.name),
 				pri: 0,
 				key: "branch",
 			});
 		} else {
-			segs.push({
-				label: "Dir",
-				text: theme.fg("muted", basename(ctx.cwd) || ctx.cwd),
-				pri: 0,
-				key: "branch",
-			});
+			// 快照未就绪或 cwd 自己的仓库：与旧行为逐字一致（git 分支；非 git 目录回退目录名）
+			const branch = footerData.getGitBranch();
+			if (branch) {
+				segs.push({
+					label: "Branch",
+					text: theme.fg("accent", branch),
+					pri: 0,
+					key: "branch",
+				});
+			} else {
+				segs.push({
+					label: "Dir",
+					text: theme.fg("muted", cwdName),
+					pri: 0,
+					key: "branch",
+				});
+			}
 		}
 
 		// 上下文占用
@@ -3593,9 +3894,38 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.notify(line, "info");
 	}
 
+	// 只读查询工具：让模型知道「用户当前要求你在哪个仓库工作」。
+	// 这是本扩展唯一的提示词可见面（工具声明，direct 曝光）；它在会话首个请求就固定下来、
+	// 之后不再变化，因此不会反复失效 prompt 前缀缓存 —— 这也是不走系统提示词 section 的原因。
+	const TypeBox = piAiRuntime.Type;
+	if (TypeBox) {
+		// `annotations`（只读提示，供权限扩展免确认）是较新版 pi 才有的字段，本包的
+		// devDependency 类型（pi-coding-agent 0.86）尚未收录，因此整体断言一次；
+		// 旧版 pi 运行时只是忽略该字段，不影响注册
+		type ToolSpec = Parameters<ExtensionAPI["registerTool"]>[0];
+		const spec = {
+			name: "get_work_focus",
+			label: "Work Focus",
+			description:
+				"查询用户当前关注、要求你工作的目录与 git 分支（可能不同于 cwd）。只读，不改变焦点。",
+			parameters: TypeBox.Object({}),
+			annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+			async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+				// 先等同批 tool_call 里那一次触碰的探测落地，再算快照（否则会报上一批的焦点）
+				await lastTouchTask;
+				await refreshFocusNow(ctx);
+				return {
+					content: [{ type: "text", text: focusDetail(ctx) }],
+					details: undefined,
+				};
+			},
+		} as ToolSpec;
+		pi.registerTool(spec);
+	}
+
 	pi.registerCommand("statusbar", {
 		description:
-			"状态栏设置：无参数打开交互菜单；子命令 on/off | layout [right|bottom|auto|split] | split [on|off] | border [auto|unicode|ascii] | fill [on|off] | dock [on|off] | metrics | quota | prices",
+			"状态栏设置：无参数打开交互菜单；子命令 on/off | layout [right|bottom|auto|split] | split [on|off] | border [auto|unicode|ascii] | fill [on|off] | dock [on|off] | focus [<路径>|cwd|auto|clear] | metrics | quota | prices",
 		handler: async (args, ctx) => {
 			const parts = args.trim().toLowerCase().split(/\s+/).filter(Boolean);
 			const sub = parts[0];
@@ -3665,6 +3995,43 @@ export default function (pi: ExtensionAPI) {
 				applyDock(ctx, a);
 				return;
 			}
+			if (sub === "focus") {
+				// 不能复用 parts：整个 args 已被 toLowerCase 过，路径会变大小写（macOS 默认不敏感，
+				// Linux/远程则直接找不到），所以从原始 args 里按前缀剥出路径
+				const raw = args
+					.trim()
+					.replace(/^focus\s*/i, "")
+					.trim()
+					.replace(/^["']|["']$/g, "");
+				if (!raw) {
+					ctx.ui.notify(focusDetail(ctx), "info");
+					return;
+				}
+				if (raw === "auto" || raw === "clear") {
+					pinnedDir = null;
+					try {
+						pi.appendEntry("statusbar:focus", { path: null });
+					} catch {
+						// 记不住就只在本次会话生效，不影响使用
+					}
+					ctx.ui.notify("焦点已回到自动推断", "info");
+				} else {
+					const dir = raw === "cwd" ? ctx.cwd : resolve(ctx.cwd, raw);
+					if (!existsSync(dir)) {
+						ctx.ui.notify(`目录不存在: ${dir}`, "warning");
+						return;
+					}
+					pinnedDir = dir;
+					try {
+						pi.appendEntry("statusbar:focus", { path: dir });
+					} catch {
+						// 同上：持久化失败不阻止本次会话生效
+					}
+					ctx.ui.notify(`焦点已钉在 ${dir}`, "info");
+				}
+				refreshFocus(ctx);
+				return;
+			}
 			if (sub === "metrics") {
 				await runMetricsPicker(ctx);
 				return;
@@ -3679,7 +4046,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (sub) {
 				ctx.ui.notify(
-					`未知子命令: ${sub}。用法: /statusbar [on|off|layout [right|bottom|auto|split]|split [on|off]|border [auto|unicode|ascii]|fill [on|off]|dock [on|off]|metrics|quota|prices]，或无参数打开交互菜单`,
+					`未知子命令: ${sub}。用法: /statusbar [on|off|layout [right|bottom|auto|split]|split [on|off]|border [auto|unicode|ascii]|fill [on|off]|dock [on|off]|focus [<路径>|cwd|auto|clear]|metrics|quota|prices]，或无参数打开交互菜单`,
 					"warning",
 				);
 				return;
@@ -3780,6 +4147,12 @@ export default function (pi: ExtensionAPI) {
 		currentCtx = null;
 		activeFooterData = null;
 		activeTui = null;
+		// 焦点是会话内状态：切/重载会话时清掉，免得把上个会话的焦点带进新会话
+		// （钉住的焦点由 appendEntry 落在分支上，session_start 会从新会话的分支里恢复）
+		pinnedDir = null;
+		autoRoot = null;
+		cwdRoot = undefined;
+		focusCache = undefined;
 	});
 
 	// 新会话/续接时按用户偏好恢复，并后台刷新一次实时单价
@@ -3802,8 +4175,33 @@ export default function (pi: ExtensionAPI) {
 			else if (sync.failed) ctx.ui.notify(t().splitSetFailed, "warning");
 		}
 		if (userWants) enable(ctx);
+		// 恢复本会话钉住的焦点：分支上最后一条 statusbar:focus 生效（path: null = 已取消）
+		pinnedDir = null;
+		for (const e of ctx.sessionManager.getBranch()) {
+			if (e.type !== "custom" || e.customType !== "statusbar:focus") continue;
+			const path = (e.data as { path?: string | null } | undefined)?.path;
+			pinnedDir = typeof path === "string" && path ? path : null;
+		}
+		// 续接/重启会话：先从 transcript 回放焦点种子，再刷快照（种子落地后的刷新生效，见世代号）
+		const seeded = seededTouch(ctx);
+		if (seeded) void noteTouchedPath(ctx, seeded, true);
+		// cwd 所属仓库根（决定「焦点是否就是 cwd 那个仓库」）与焦点快照；异步，本帧先走旧行为
+		refreshFocus(ctx);
 		updateTitle(ctx);
 		void refreshPrices(ctx, false);
+	});
+
+	// 自动推断工作焦点：edit/write 立即抢占（你在哪干活的最强信号），read/ls/grep/find
+	// 等弱信号只在尚无焦点时生效（见 noteTouchedPath），避免代理顺手读别的仓库就把焦点带跑
+	pi.on("tool_call", async (event, ctx) => {
+		if (pinnedDir) return;
+		const raw = (event.input as { path?: unknown }).path;
+		if (typeof raw !== "string" || !raw) return;
+		const strong = event.toolName === "edit" || event.toolName === "write";
+		// 存下任务而不是 void 掉：同一批的 get_work_focus 要等它落地（见 lastTouchTask）
+		lastTouchTask = noteTouchedPath(ctx, raw, strong)
+			.then(() => undefined)
+			.catch(() => undefined);
 	});
 	// 切换模型后重绘：触发新 provider 额度段显示与首次拉取；用量缓存作废后按逐条消息单价重算
 	pi.on("model_select", async (_event, ctx) => {
@@ -3827,7 +4225,11 @@ export default function (pi: ExtensionAPI) {
 	pi.on("turn_end", async (_event, ctx) => {
 		currentCtx = ctx;
 		updateTitle(ctx);
-		if (userWants) activeTui?.requestRender();
+		// 轮末重探一次焦点：代理可能用 bash 切了焦点仓库的分支（footerData 只覆盖 cwd）
+		if (userWants) {
+			refreshFocus(ctx);
+			activeTui?.requestRender();
+		}
 	});
 
 	// 首 token 耗时：请求发出前记起点，首个 assistant 消息开始时记终点

@@ -8,7 +8,10 @@
 
 ```text
 main │ ↑12.3k ↓45.6k ⚡100k·85% $0.123 ⏱980ms 128 tok/s │ ▰▰▰▱▱▱▱▱▱▱ 23% │ GLM 5h 12%(3h56m)·1周 34%(6d10h) │ glm-5.3·high │ LSP Active
+pi-statusbar (main) ·harness │ ↑12.3k ↓45.6k ⚡100k·85% $0.123 ⏱980ms 128 tok/s │ ▰▰▰▱▱▱▱▱▱▱ 23% │ glm-5.3·high
 ```
+
+第二行是 cwd 停在多仓工作区根、但实际在改 `pi-statusbar` 时的样子（见「工作焦点」）。
 
 五种布局（`layout`）可选：
 
@@ -21,6 +24,7 @@ main │ ↑12.3k ↓45.6k ⚡100k·85% $0.123 ⏱980ms 128 tok/s │ ▰▰▰�
 ## 功能
 
 - **替换内置 footer**：`git 分支 │ ↑输入 ↓输出 ⚡缓存·命中率 $花费 ⏱首token 输出tok/s │ 上下文% │ 订阅额度 │ 模型 │ 其他扩展状态`
+- **工作焦点（focus）**：分支段展示「用户要求你工作的那个仓库」，而不是硬绑 cwd。cwd 是多仓工作区根时显示 `pi-statusbar (main) ·harness`（`仓库(分支)` + 暗色 cwd 后缀）；焦点与 cwd 同仓时保持原样 `main`。来源：`/statusbar focus <路径>` 手动钉住 > 按工具触碰自动推断 > cwd，另有只读工具 `get_work_focus` 供模型查询，详见「工作焦点」
 - **实时单价**：从 [models.dev](https://models.dev) 拉取官方单价计算花费（本地缓存 24h），失败回落 models.json 的 cost 字段；自动匹配会跳过 0 价的订阅/免费端点，`/statusbar prices` 强制刷新并显示单价来源与匹配方式（命中 0 价/多候选时给出 priceMap 建议）
 - **上下文告警**：占用 ≥75% 变黄，≥90% 变红
 - **订阅额度自动发现**：按 provider baseUrl 匹配，只显示当前模型所属 provider 的额度
@@ -190,6 +194,55 @@ regular 模式下选 `split` / `auto-split` 不会报错，而是退回底部单
 - pi-subagents ≤ 0.77 在 **Pi 1.2.0** 上后台子任务全部启动失败（`does not provide @earendil-works/chord`）：后台子任务默认开启（`asyncByDefault`），失败后只剩前台单发；升级到 0.78+ 并**重启 pi**（跑着的进程不会换掉已加载的扩展）即可恢复
 - 想把 FleetView 也放进右栏，还可在 `~/.pi/agent/extensions/subagent/config.json` 里设 `{ "fleetViewPlacement": "aboveEditor" }`（本扩展已同时支持下方容器，两处都不设也没问题）
 
+## 工作焦点（focus）
+
+分支段默认只看 cwd 所属的 git 仓库；cwd 不是仓库（典型：多仓工作区根）时退回显示目录名。但实际工作时常常是：**会话开在工作区根，人却只要改其中一个仓**。这时候状态栏该回答“我在哪个仓的哪个分支上”，而不是把工作区根名当分支显示。
+
+```
+main │ …                              ← 焦点就是 cwd 所属仓库：与以前逐字一致
+pi-statusbar (main) ·harness │ …      ← 焦点是另一个仓库：仓库(分支)，暗色后缀是 cwd
+```
+
+右侧竖卡是一行 `Focus`（label 与其他段落一样是英文，`config.language` 只管配置菜单文案），默认 32 列面板放得下 `pi-statusbar (main)`，再长会自动折行：
+
+```
+┌────────────────────────────────┐
+│ Focus   pi-statusbar (main)    │
+└────────────────────────────────┘
+```
+
+### 焦点怎么确定
+
+| 优先级 | 来源 | 说明 |
+| --- | --- | --- |
+| 1 | 手动钉住 | `/statusbar focus <路径>`；写入会话分支（`appendEntry`，customType=`statusbar:focus`），续接/重载会话时恢复 |
+| 2 | 自动推断 | 工具调用里带上路径的：`edit` / `write` 立即抢占（“你在哪干活”的最强信号）；`read` / `ls` / `grep` / `find` 只在**尚无焦点**时建立焦点，不抢占 |
+| 3 | cwd 默认 | 没有任何焦点时，回落到 `footerData.getGitBranch()` / cwd 目录名（即原有行为） |
+
+别的细节：
+
+- 重启/续接会话时会**从 transcript 回放**一个焦点种子（只看最近的 400 条 assistant 消息：最近的 `edit` / `write` 优先，都没有才取最近的读取类调用），否则扩展内存一空、状态栏就退回 cwd —— 用户视角就是“重启后忘了我在哪工作”
+- 非 git 路径（工作区根里的散文件、临时文件）不改变焦点；`bash` 不参与（命令里解析路径噪音太大）
+- 又改回 cwd 自己那个仓库时，焦点自动复位，外观回到 `main`
+- git 探测走两条 `execFile("git", ["-C", dir, ...])`：`rev-parse --show-toplevel` 取仓库根、`symbolic-ref --short -q HEAD` 取分支（detached 时回落 `rev-parse --short HEAD` 取短 sha）。分两条是因为合成一条 `rev-parse --show-toplevel --abbrev-ref HEAD` 在**未出生分支**（`git init` 后还没提交）上会整体报错、连仓库根一起丢。全程**无 shell**、1.5s 超时、按目录去重 + 2s TTL 缓存；渲染路径只读快照，**绝不在渲染里 spawn 进程**；cwd 一侧的仓库根也取 git 的返回值（规范路径），因此软链/`/var`→`/private/var` 这类拼写差异不会让同一个仓库被当成两个
+- 钉住的目录不是 git 仓库时（手动指一个普通目录），`Dir` 行显示该目录名
+
+### 模型侧：只读工具 `get_work_focus`
+
+模型可以问“我现在该在哪个仓库工作”，返回 cwd / 焦点目录 / 仓库根 / 分支 / 来源。工具声明是**只读**的（`readOnlyHint`），**不会改变焦点**。
+
+它执行前会先等「同一条消息里其他工具触发的那次触碰探测」落地：pi 会先把一批工具的全部 `tool_call` 事件派发完，再并发执行这批次（`executeToolCallsParallel`），所以 `read pi-statusbar/x` + `get_work_focus` 同批时，后者不会回答“上一批”的旧焦点。
+
+### 为什么不把焦点写进系统提示词
+
+因为会明显压低缓存命中率，而收益不成比例：
+
+- pi 的系统提示词是**按 section 名字 diff** 的：内容不变就不发补丁，改了才发。
+- 补丁是一条追加在 transcript 尾部的 `system` 消息；只有模型 compat 里 `supportsMidConvoSystemMessages` 为 true 时它才留在尾部（前缀不动、缓存照命中）。
+- 大多数模型（包括本机 magpie 这类 `openai-completions` 自定义 provider，compat 里没这个字段）会走 `collapseSystemMessages`：**所有 system 消息折叠成开头唯一那条**。于是任意 section 变化 = 头部文本变化 = 整个 prompt 前缀从头失效（Anthropic 更直接：头部就是带 `cache_control` 的 system block）。
+
+一次焦点变化就是一次全量前缀重算（100k 前缀按 cache write 计费约 $0.02~$0.35，看模型档位）；更危险的是把易变字段（HEAD sha、脏文件数、时间戳、最近触碰的文件）写进去，那会变成每轮一次。所以这里改成“只展示 + 模型按需查”：提示词与工具声明在会话首个请求就固定，之后不变。
+
 ## 命令
 
 | 命令 | 说明 |
@@ -201,6 +254,9 @@ regular 模式下选 `split` / `auto-split` 不会报错，而是退回底部单
 | `/statusbar border [auto\|unicode\|ascii]` | 面板边框字符集（写回 `panelBorder` 并立即重绘），不带参数时按 auto → unicode → ascii 循环 |
 | `/statusbar fill [on\|off]` | 分栏面板是否铺满整屏高度（写回 `panelFill` 并立即重绘），不带参数时取反；只对分栏布局（`split` / `auto-split`）生效 |
 | `/statusbar dock [on\|off]` | 分栏布局（`split` / `auto-split`）下把 pi 的「编辑器上方 / 下方」widget 容器（异步 agent 面板 / FleetView）搬进右栏（写回 `dockWidgetsInSplit` 并立即重排），不带参数时取反 |
+| `/statusbar focus` | 报告当前焦点：cwd / 焦点目录 / 仓库根 / 分支 / 来源（非交互模式请让模型调 `get_work_focus`） |
+| `/statusbar focus <路径>` | 把焦点钉到指定目录（相对路径按 cwd 解析；不存在会拒绝），写入会话分支并可被续接恢复；`cwd` 等价于钉到当前目录 |
+| `/statusbar focus auto\|clear` | 取消钉住，回到自动推断（保留已经推断出的焦点） |
 | `/statusbar metrics` | 直接进入指标显隐交互式配置 |
 | `/statusbar quota` | 强制刷新订阅额度并显示详情 |
 | `/statusbar prices` | 强制刷新实时单价并显示当前模型单价来源 |
@@ -229,7 +285,7 @@ regular 模式下选 `split` / `auto-split` 不会报错，而是退回底部单
 
 ## 安全提示
 
-pi 扩展以完整系统权限运行。安装前请审阅 [extensions/statusbar.ts](extensions/statusbar.ts) 源码（仅有的网络请求：models.dev 单价接口与各 provider 官方额度接口）。
+pi 扩展以完整系统权限运行。安装前请审阅 [extensions/statusbar.ts](extensions/statusbar.ts) 源码（仅有的网络请求：models.dev 单价接口与各 provider 官方额度接口；唯一的本地子进程：工作焦点用 `execFile` 调 `git rev-parse` 探测仓库/分支，无 shell、带超时与缓存）。
 
 ## License
 
